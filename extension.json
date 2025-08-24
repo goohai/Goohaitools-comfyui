@@ -1,0 +1,34 @@
+{
+  "title": "GoohaiTools ComfyUI Nodes",
+  "description": "一个功能丰富的ComfyUI自定义节点合集，包含超过50个各类工具节点。",
+  "author": "goohai",
+  "reference": "", // 可选，例如一个教程或说明文档的链接
+  "tags": ["孤海", "tool", "utility", "image-processing", "face-detection"], // 添加一些相关的标签
+  "install_mode": "copy", // 推荐使用"copy"模式，简单可靠
+  "files": [
+    {
+      "src": "nodes/*.py",
+      "dst": "custom_nodes/Goohaitools-comfyui/nodes/"
+    },
+    {
+      "src": "fonts/",
+      "dst": "custom_nodes/Goohaitools-comfyui/fonts/"
+    },
+    {
+      "src": "requirements.txt",
+      "dst": "custom_nodes/Goohaitools-comfyui/"
+    },
+    {
+      "src": "shape_predictor_5_face_landmarks.dat",
+      "dst": "custom_nodes/Goohaitools-comfyui/"
+    },
+    {
+      "src": "__init__.py",
+      "dst": "custom_nodes/Goohaitools-comfyui/"
+    },
+    {
+      "src": "extension.json",
+      "dst": "custom_nodes/Goohaitools-comfyui/"
+    }
+  ]
+}
