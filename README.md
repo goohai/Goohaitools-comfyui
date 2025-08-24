@@ -1,1 +1,1 @@
-cd https://github.com/goohai/Goohaitools-comfyui.git
+git clone https://github.com/goohai/Goohaitools-comfyui.git
