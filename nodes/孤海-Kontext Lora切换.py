@@ -16,7 +16,7 @@ class KontextLoraSwitch:
 《04. 留衣去人》【Kontext\获取衣物KontextLoRA_1.0.safetensors】{Remove the characters, keep the clothing,Remove the facial features and hair of the character.}
 《05. 人像精修》【Kontext\kontext-专业级人像精修_1.0.safetensors】{Adjust the color of the picture, beautify the skin and posture of the characters while keeping the person in the exact same position, scale, and pose}
 《06. 万物精修》【Kontext\ZOEY-kontext-万物精修、修复、高清_Alpha.safetensors】{Enhance the details of this damaged item and restore it to high resolution ,making it look like new while keeping the original style.}
-《07. 万物迁移》【Kontext\put it here_kontext—万能贴—万物迁移_V_0.1.safetensors】{put it here}
+《07. 万物迁移》【Kontext\Put it here_V4.2.safetensors】{Put it here：Adaptive, automatic light adaptation, 4K, high definition, outstanding picture quality}
 《08. 脱吧脱吧》【Kontext\脱衣kontext-clothes_remover_v0.safetensors】{Take off the character's clothes}
 《09. 去灰调色》【Kontext\kontexe人物摄影打光调色———阿牛_1.safetensors】{Adjust the overall color and lighting of the image to match the quality of the photographic film}
 《10. 外墙翻新》【Kontext\kontext-建筑设计-外立面改造-新中式_1.0.safetensors】{Decorate this building in a Chinese style}
@@ -59,6 +59,7 @@ class KontextLoraSwitch:
 《47. 孤海-冰晶玻璃》【Kontext\孤海-冰晶玻璃-kontext.safetensors】{Change the image style to the frosted ice glass effect，An ice glass artwork created a beautiful reflection on the ice surface.}
 《48. 孤海-一键逆光》【Kontext\孤海-自动打光-逆光-kontext.safetensors】{Just change the lighting of the picture to backlighting while keeping the facial features and composition of the characters unchanged.}
 《49. 孤海-自动打光-轮廓光加强》【Kontext\孤海-自动打光-轮廓光加强-kontext.safetensors】{Just change the lighting of the picture to backlighting while keeping the facial features and composition of the characters unchanged.}
+《50. 卸妆》【Kontext\Kontext_remove卸妆_v1.safetensors】{Remove makeup of this person}
 
 """
     
