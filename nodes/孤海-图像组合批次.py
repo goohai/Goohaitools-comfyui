@@ -7,7 +7,9 @@ class 孤海图像组合批次:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {},
+            "required": {
+                "统一尺寸模式": (["裁剪", "填充"], {"default": "裁剪"}),
+            },
             "optional": {
                 "图像1": ("IMAGE",),
                 "图像2": ("IMAGE",),
@@ -22,7 +24,7 @@ class 孤海图像组合批次:
     FUNCTION = "combine_images"
     CATEGORY = "孤海工具箱"
 
-    def combine_images(self, **kwargs):
+    def combine_images(self, 统一尺寸模式="裁剪", **kwargs):
         valid_images = []
         target_size = None
         batch_count = 0
@@ -55,20 +57,37 @@ class 孤海图像组合批次:
                 orig_width, orig_height = pil_img.size
                 target_height, target_width = target_size
                 
-                # 计算保持比例的缩放尺寸
-                ratio = max(target_width / orig_width, target_height / orig_height)
+                # 根据模式计算不同的缩放比例
+                if 统一尺寸模式 == "裁剪":
+                    # 裁剪模式：使用最大比例确保覆盖整个区域
+                    ratio = max(target_width / orig_width, target_height / orig_height)
+                else:
+                    # 填充模式：使用最小比例确保图像完整显示
+                    ratio = min(target_width / orig_width, target_height / orig_height)
+                
+                # 计算新的尺寸
                 new_width = int(orig_width * ratio + 0.5)
                 new_height = int(orig_height * ratio + 0.5)
                 
                 # Lanczos缩放
                 pil_img = pil_img.resize((new_width, new_height), resample=Image.LANCZOS)
                 
-                # 居中裁剪
-                left = max(0, (new_width - target_width) // 2)
-                top = max(0, (new_height - target_height) // 2)
-                right = left + target_width
-                bottom = top + target_height
-                pil_img = pil_img.crop((left, top, right, bottom))
+                if 统一尺寸模式 == "裁剪":
+                    # 裁剪模式：居中裁剪
+                    left = max(0, (new_width - target_width) // 2)
+                    top = max(0, (new_height - target_height) // 2)
+                    right = left + target_width
+                    bottom = top + target_height
+                    pil_img = pil_img.crop((left, top, right, bottom))
+                else:
+                    # 填充模式：创建白色背景图像
+                    new_img = Image.new("RGB", (target_width, target_height), (255, 255, 255))
+                    # 计算居中粘贴位置
+                    paste_x = max(0, (target_width - new_width) // 2)
+                    paste_y = max(0, (target_height - new_height) // 2)
+                    # 将缩放后的图像粘贴到白色背景上
+                    new_img.paste(pil_img, (paste_x, paste_y))
+                    pil_img = new_img
                 
                 # 转换回张量
                 img_np = np.array(pil_img).astype(np.float32) / 255.0
