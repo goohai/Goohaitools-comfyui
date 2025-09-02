@@ -25,7 +25,7 @@ class KontextLoraSwitch:
 《13. 提取服装到白背景》【Kontext\kontext _ 提取服装LoRA_V1.0.safetensors】{Extract the clothes from the image and til them flat on a white background, product photography style, keep the clothes style and details unchanged, high-end texture}
 《14. 修容瘦身》【Kontext\ZOEY-kontext-摄影瘦身修容_Alpha.safetensors】{The person becomes thinner. Retain the original facial expression and outfit,Make the character's body slimmer while keeping the original pose and background while preserving facial features}
 《15. 粒子转绘》【Kontext\KC-Kontext一键粒子转绘_V1.safetensors】{Convert this image into a sketch style composed of luminescent particles. The background is black,while maintaining consistency in character images and similarity in appearance.,}
-《16. 世界杯_亚洲审美》【Kontext\胸部增强-亚洲审美_kontext .safetensors】{Change to large breasts while adjusting the clothing to reveal more cleavage,}
+《16. 卸妆》【Kontext\Kontext_remove卸妆_v1.safetensors】{Remove makeup of this person}
 《17. 世界末日_电影风》【Kontext\Kontext-世界末日.safetensors】{remove people, Transform the scene into a P0stAp0calyptic scene while preserving the original composition, proportions and viewing angle. damaged building}
 《18. 破损照片效果》【Kontext\kontext-破损照片效果-lora.safetensors】{make it an old and damaged photo}
 《19. 可爱毛绒绒》【Kontext\星梦｜Kontext｜毛绒绒｜Fluffy_v1.safetensors】{make this object fluffy}
@@ -59,7 +59,9 @@ class KontextLoraSwitch:
 《47. 孤海-冰晶玻璃》【Kontext\孤海-冰晶玻璃-kontext.safetensors】{Change the image style to the frosted ice glass effect，An ice glass artwork created a beautiful reflection on the ice surface.}
 《48. 孤海-一键逆光》【Kontext\孤海-自动打光-逆光-kontext.safetensors】{Just change the lighting of the picture to backlighting while keeping the facial features and composition of the characters unchanged.}
 《49. 孤海-自动打光-轮廓光加强》【Kontext\孤海-自动打光-轮廓光加强-kontext.safetensors】{Just change the lighting of the picture to backlighting while keeping the facial features and composition of the characters unchanged.}
-《50. 卸妆》【Kontext\Kontext_remove卸妆_v1.safetensors】{Remove makeup of this person}
+《50. 孤海-双 色球 充气》【Kontext\孤海_双 色球_充气_kontext.safetensors】{Change the breasts to huge breasts}
+《51. 孤海-双 色球 巅峰杯》【Kontext\孤海_双 色球_巅峰杯_kontext.safetensors】{Change the breasts to huge breasts}
+
 
 """
     

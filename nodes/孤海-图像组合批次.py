@@ -1,4 +1,7 @@
 import torch
+import numpy as np
+from PIL import Image
+import torchvision.transforms.functional as TF
 
 class 孤海图像组合批次:
     @classmethod
@@ -14,7 +17,6 @@ class 孤海图像组合批次:
             }
         }
     
-    # 添加INT类型的批次总数输出
     RETURN_TYPES = ("IMAGE", "BOOLEAN", "INT")
     RETURN_NAMES = ("批次图像", "布尔", "批次总数")
     FUNCTION = "combine_images"
@@ -22,23 +24,64 @@ class 孤海图像组合批次:
 
     def combine_images(self, **kwargs):
         valid_images = []
-        batch_count = 0  # 初始化批次计数器
+        target_size = None
+        batch_count = 0
         
-        # 检查所有图像输入并计数
+        # 第一轮遍历：收集有效图像并确定目标尺寸
         for i in range(1, 6):
             img = kwargs.get(f"图像{i}")
             if img is not None and img.numel() > 0:
                 valid_images.append(img)
-                batch_count += img.shape[0]  # 累加当前图像的批次大小
+                # 设置第一个有效图像的第一张作为目标尺寸
+                if target_size is None:
+                    target_size = img[0].shape[:2]  # 获取(H, W)
+                batch_count += img.shape[0]  # 累加批次
         
-        # 处理空输入情况
+        # 无有效图像处理
         if not valid_images:
             black_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-            return (black_image, 0, 0)  # 批次总数返回0
+            return (black_image, False, 0)
         
-        # 组合所有有效图像
-        combined = torch.cat(valid_images, dim=0)
-        return (combined, 1, batch_count)  # 返回实际批次总数
+        # 第二轮遍历：调整所有图像尺寸
+        processed_images = []
+        for img_batch in valid_images:
+            resized_batch = []
+            for img in img_batch:
+                # 将张量转换为PIL图像
+                img_np = img.numpy() * 255.0
+                pil_img = Image.fromarray(img_np.astype(np.uint8))
+                
+                # 原始尺寸和目标尺寸
+                orig_width, orig_height = pil_img.size
+                target_height, target_width = target_size
+                
+                # 计算保持比例的缩放尺寸
+                ratio = max(target_width / orig_width, target_height / orig_height)
+                new_width = int(orig_width * ratio + 0.5)
+                new_height = int(orig_height * ratio + 0.5)
+                
+                # Lanczos缩放
+                pil_img = pil_img.resize((new_width, new_height), resample=Image.LANCZOS)
+                
+                # 居中裁剪
+                left = max(0, (new_width - target_width) // 2)
+                top = max(0, (new_height - target_height) // 2)
+                right = left + target_width
+                bottom = top + target_height
+                pil_img = pil_img.crop((left, top, right, bottom))
+                
+                # 转换回张量
+                img_np = np.array(pil_img).astype(np.float32) / 255.0
+                tensor_img = torch.from_numpy(img_np)
+                resized_batch.append(tensor_img)
+            
+            # 合并批次并恢复原始格式
+            resized_batch = torch.stack(resized_batch, dim=0)
+            processed_images.append(resized_batch)
+        
+        # 组合所有处理后的图像
+        combined = torch.cat(processed_images, dim=0)
+        return (combined, True, batch_count)
 
 # 注册节点
 NODE_CLASS_MAPPINGS = {
