@@ -9,10 +9,10 @@ class 孤海遮罩分析:
         return {
             "required": {
                 "遮罩": ("MASK",),
-                "上扩百分比": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "display": "上扩%"}),
-                "下扩百分比": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "display": "下扩%"}),
-                "左扩百分比": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "display": "左扩%"}),
-                "右扩百分比": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "display": "右扩%"}),
+                "上扩百分比": ("INT", {"default": 0, "min": -90, "max": 1000, "step": 1, "display": "上扩%"}),
+                "下扩百分比": ("INT", {"default": 0, "min": -90, "max": 1000, "step": 1, "display": "下扩%"}),
+                "左扩百分比": ("INT", {"default": 0, "min": -90, "max": 1000, "step": 1, "display": "左扩%"}),
+                "右扩百分比": ("INT", {"default": 0, "min": -90, "max": 1000, "step": 1, "display": "右扩%"}),
             }
         }
 
@@ -40,20 +40,74 @@ class 孤海遮罩分析:
         y_min, y_max = np.min(y_indices), np.max(y_indices)
         orig_mask_w = x_max - x_min + 1
         orig_mask_h = y_max - y_min + 1
-
-        # 计算扩展量（基于原始有效区域尺寸）
-        top_ext = max(0, int(orig_mask_h * 上扩百分比 / 100))
-        bottom_ext = max(0, int(orig_mask_h * 下扩百分比 / 100))
-        left_ext = max(0, int(orig_mask_w * 左扩百分比 / 100))
-        right_ext = max(0, int(orig_mask_w * 右扩百分比 / 100))
-
+        
+        # 初始化扩展/收缩量
+        top_ext = 0
+        bottom_ext = 0
+        left_ext = 0
+        right_ext = 0
+        
+        # 处理垂直方向（上下）
+        if 上扩百分比 < 0 or 下扩百分比 < 0:
+            # 计算垂直方向的总收缩百分比（取正值）
+            total_vertical_shrink = max(0, -上扩百分比) + max(0, -下扩百分比)
+            
+            if total_vertical_shrink > 0:
+                # 计算最大允许收缩量（保留至少10%）
+                max_shrink_h = orig_mask_h * 0.9
+                
+                if total_vertical_shrink > max_shrink_h:
+                    # 按比例分配收缩量
+                    scale = max_shrink_h / total_vertical_shrink
+                    top_ext = -int(max(0, -上扩百分比) * scale)
+                    bottom_ext = -int(max(0, -下扩百分比) * scale)
+                else:
+                    top_ext = 上扩百分比
+                    bottom_ext = 下扩百分比
+        else:
+            top_ext = 上扩百分比
+            bottom_ext = 下扩百分比
+            
+        # 处理水平方向（左右）
+        if 左扩百分比 < 0 or 右扩百分比 < 0:
+            # 计算水平方向的总收缩百分比（取正值）
+            total_horizontal_shrink = max(0, -左扩百分比) + max(0, -右扩百分比)
+            
+            if total_horizontal_shrink > 0:
+                # 计算最大允许收缩量（保留至少10%）
+                max_shrink_w = orig_mask_w * 0.9
+                
+                if total_horizontal_shrink > max_shrink_w:
+                    # 按比例分配收缩量
+                    scale = max_shrink_w / total_horizontal_shrink
+                    left_ext = -int(max(0, -左扩百分比) * scale)
+                    right_ext = -int(max(0, -右扩百分比) * scale)
+                else:
+                    left_ext = 左扩百分比
+                    right_ext = 右扩百分比
+        else:
+            left_ext = 左扩百分比
+            right_ext = 右扩百分比
+        
+        # 处理正扩展和负收缩
+        top_ext_val = int(orig_mask_h * abs(top_ext) / 100) * (-1 if top_ext < 0 else 1)
+        bottom_ext_val = int(orig_mask_h * abs(bottom_ext) / 100) * (-1 if bottom_ext < 0 else 1)
+        left_ext_val = int(orig_mask_w * abs(left_ext) / 100) * (-1 if left_ext < 0 else 1)
+        right_ext_val = int(orig_mask_w * abs(right_ext) / 100) * (-1 if right_ext < 0 else 1)
+        
         # 计算新区域边界（限制在画布范围内）
-        new_y_min = max(0, y_min - top_ext)
-        new_y_max = min(orig_h-1, y_max + bottom_ext)
-        new_x_min = max(0, x_min - left_ext)
-        new_x_max = min(orig_w-1, x_max + right_ext)
+        new_y_min = max(0, y_min - (top_ext_val if top_ext_val > 0 else 0) + (abs(top_ext_val) if top_ext_val < 0 else 0))
+        new_y_max = min(orig_h-1, y_max + (bottom_ext_val if bottom_ext_val > 0 else 0) - (abs(bottom_ext_val) if bottom_ext_val < 0 else 0))
+        new_x_min = max(0, x_min - (left_ext_val if left_ext_val > 0 else 0) + (abs(left_ext_val) if left_ext_val < 0 else 0))
+        new_x_max = min(orig_w-1, x_max + (right_ext_val if right_ext_val > 0 else 0) - (abs(right_ext_val) if right_ext_val < 0 else 0))
+        
+        # 确保边界有效
+        if new_y_min > new_y_max:
+            new_y_min, new_y_max = y_min, y_max
+        if new_x_min > new_x_max:
+            new_x_min, new_x_max = x_min, x_max
 
-        # 创建扩展后的遮罩
+        # 创建扩展/收缩后的遮罩
         new_mask[new_y_min:new_y_max+1, new_x_min:new_x_max+1] = 1.0
 
         # 转换回tensor格式
