@@ -1,4 +1,4 @@
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 import numpy as np
 import torch
 import comfy.utils
@@ -19,6 +19,7 @@ class 孤海图像缩放按像素:
                 "启用填充色": ("BOOLEAN", {"default": False}),
                 "填充颜色": ("COLOR", {"default": "#ffffff"}),
                 "自适应旋转": ("BOOLEAN", {"default": False}),
+                "整除数": ("INT", {"default": 0, "min": 0, "max": 256}),
             },
             "optional": {
                 "遮罩": ("MASK",),
@@ -30,7 +31,7 @@ class 孤海图像缩放按像素:
     FUNCTION = "执行缩放"
     CATEGORY = "孤海工具箱"
 
-    def 执行缩放(self, 图像, 缩放方法, 宽度, 高度, 将边缩放到, 缩放插值, 缩放模式, 执行条件, 启用填充色, 填充颜色, 自适应旋转, 遮罩=None):
+    def 执行缩放(self, 图像, 缩放方法, 宽度, 高度, 将边缩放到, 缩放插值, 缩放模式, 执行条件, 启用填充色, 填充颜色, 自适应旋转, 整除数, 遮罩=None):
         img = tensor2pil(图像)
         原宽度, 原高度 = img.size
         
@@ -59,6 +60,7 @@ class 孤海图像缩放按像素:
                 if (输入横版 and 原图竖版) or (输入竖版 and 原图横版):
                     img = img.rotate(90, expand=True)
                     mask_pil = mask_pil.rotate(90, expand=True)
+                    扩展遮罩 = 扩展遮罩.rotate(90, expand=True)
                     原宽度, 原高度 = 原高度, 原宽度
 
         # 执行条件判断
@@ -71,11 +73,23 @@ class 孤海图像缩放按像素:
         elif 执行条件 == "最小边小于时" and 最短边 >= 将边缩放到:
             需要缩放 = False
         
+        # 应用整除数要求（在缩放前处理）
+        def 应用整除(目标宽, 目标高):
+            if 整除数 > 1:
+                目标宽 = (目标宽 // 整除数) * 整除数
+                目标高 = (目标高 // 整除数) * 整除数
+                # 确保最小尺寸为整除数
+                目标宽 = max(整除数, 目标宽)
+                目标高 = max(整除数, 目标高)
+            return 目标宽, 目标高
+        
         if 需要缩放:
             if 缩放方法 == "按长边保持比例":
                 比例 = 将边缩放到 / 最长边
                 新宽度 = round(原宽度 * 比例)
                 新高度 = round(原高度 * 比例)
+                # 应用整除数要求
+                新宽度, 新高度 = 应用整除(新宽度, 新高度)
                 img, mask_pil = self.调整尺寸(img, mask_pil, 新宽度, 新高度, 缩放插值)
                 扩展遮罩 = Image.new("L", (新宽度, 新高度), 0)
                 
@@ -83,37 +97,55 @@ class 孤海图像缩放按像素:
                 比例 = 将边缩放到 / 最短边
                 新宽度 = round(原宽度 * 比例)
                 新高度 = round(原高度 * 比例)
+                # 应用整除数要求
+                新宽度, 新高度 = 应用整除(新宽度, 新高度)
                 img, mask_pil = self.调整尺寸(img, mask_pil, 新宽度, 新高度, 缩放插值)
                 扩展遮罩 = Image.new("L", (新宽度, 新高度), 0)
                 
             else:  # 自定义宽高模式
-                新宽度 = 宽度
-                新高度 = 高度
+                # 特殊处理：当其中一个尺寸为0时，保持原始比例
+                if 宽度 == 0 and 高度 != 0:
+                    比例 = 高度 / 原高度
+                    新宽度 = round(原宽度 * 比例)
+                    新高度 = 高度
+                elif 高度 == 0 and 宽度 != 0:
+                    比例 = 宽度 / 原宽度
+                    新宽度 = 宽度
+                    新高度 = round(原高度 * 比例)
+                else:
+                    新宽度, 新高度 = 宽度, 高度
                 
-                if 宽度 == 0 or 高度 == 0:
-                    if 原宽度 == 0 or 原高度 == 0:
-                        raise ValueError("原始图像尺寸不能为0")
-                    
-                    if 宽度 == 0 and 高度 != 0:
-                        比例 = 高度 / 原高度
-                        新宽度 = round(原宽度 * 比例)
-                    elif 高度 == 0 and 宽度 != 0:
-                        比例 = 宽度 / 原宽度
-                        新高度 = round(原高度 * 比例)
-                        
+                # 应用整除数要求（在缩放操作前）
+                新宽度, 新高度 = 应用整除(新宽度, 新高度)
+                
+                if 缩放模式 == "拉伸":
                     img, mask_pil = self.调整尺寸(img, mask_pil, 新宽度, 新高度, 缩放插值)
                     布尔 = False
+                elif 缩放模式 == "裁剪":
+                    img, mask_pil, 扩展遮罩 = self.居中裁剪(img, mask_pil, 新宽度, 新高度, 缩放插值)
+                    布尔 = False
                 else:
-                    if 缩放模式 == "拉伸":
-                        img, mask_pil = self.调整尺寸(img, mask_pil, 新宽度, 新高度, 缩放插值)
-                        布尔 = False
-                    elif 缩放模式 == "裁剪":
-                        img, mask_pil, 扩展遮罩 = self.居中裁剪(img, mask_pil, 新宽度, 新高度, 缩放插值)
-                        布尔 = False
-                    else:
-                        img, mask_pil, 扩展遮罩, 布尔 = self.智能填充(img, mask_pil, 新宽度, 新高度, 缩放插值, 启用填充色, 填充颜色)
+                    img, mask_pil, 扩展遮罩, 布尔 = self.智能填充(img, mask_pil, 新宽度, 新高度, 缩放插值, 启用填充色, 填充颜色)
         else:
+            # 不需要缩放时，直接应用整除数要求
             新宽度, 新高度 = 原宽度, 原高度
+            if 整除数 > 1:
+                整除宽度 = (原宽度 // 整除数) * 整除数
+                整除高度 = (原高度 // 整除数) * 整除数
+                整除宽度 = max(整除数, 整除宽度)
+                整除高度 = max(整除数, 整除高度)
+                
+                if 整除宽度 < 原宽度 or 整除高度 < 原高度:
+                    # 居中裁剪到整除尺寸
+                    左边 = (原宽度 - 整除宽度) // 2
+                    顶边 = (原高度 - 整除高度) // 2
+                    右边 = 左边 + 整除宽度
+                    底边 = 顶边 + 整除高度
+                    
+                    img = img.crop((左边, 顶边, 右边, 底边))
+                    mask_pil = mask_pil.crop((左边, 顶边, 右边, 底边))
+                    扩展遮罩 = 扩展遮罩.crop((左边, 顶边, 右边, 底边))
+                    新宽度, 新高度 = 整除宽度, 整除高度
 
         img_tensor = pil2tensor(img)
         mask_tensor = pil2mask(mask_pil)
@@ -135,42 +167,81 @@ class 孤海图像缩放按像素:
         )
 
     def 居中裁剪(self, img, mask, 目标宽度, 目标高度, 插值方法):
-        比例 = max(目标宽度/img.width, 目标高度/img.height)
-        缩放尺寸 = (round(img.width * 比例), round(img.height * 比例))
-        img_scaled, mask_scaled = self.调整尺寸(img, mask, 缩放尺寸[0], 缩放尺寸[1], 插值方法)
-        左边 = (缩放尺寸[0] - 目标宽度) // 2
-        顶边 = (缩放尺寸[1] - 目标高度) // 2
+        # 计算需要缩放的尺寸以覆盖目标区域
+        宽比 = 目标宽度 / img.width
+        高比 = 目标高度 / img.height
+        比例 = max(宽比, 高比)
+        
+        缩放宽度 = round(img.width * 比例)
+        缩放高度 = round(img.height * 比例)
+        
+        img_scaled = img.resize((缩放宽度, 缩放高度), self.获取插值方法(插值方法))
+        mask_scaled = mask.resize((缩放宽度, 缩放高度), self.获取插值方法(插值方法))
+        
+        # 居中裁剪
+        左边 = (缩放宽度 - 目标宽度) // 2
+        顶边 = (缩放高度 - 目标高度) // 2
         return (
-            img_scaled.crop((左边, 顶边, 左边+目标宽度, 顶边+目标高度)),
-            mask_scaled.crop((左边, 顶边, 左边+目标宽度, 顶边+目标高度)),
+            img_scaled.crop((左边, 顶边, 左边 + 目标宽度, 顶边 + 目标高度)),
+            mask_scaled.crop((左边, 顶边, 左边 + 目标宽度, 顶边 + 目标高度)),
             Image.new("L", (目标宽度, 目标高度), 0)
         )
 
     def 智能填充(self, img, mask, 目标宽度, 目标高度, 插值方法, 启用填充色, 颜色):
         填充色 = 颜色 if 启用填充色 else "#808080"
-        缩放比例 = min(目标宽度/img.width, 目标高度/img.height)
-        新宽度 = round(img.width * 缩放比例)
-        新高度 = round(img.height * 缩放比例)
-        img, mask = self.调整尺寸(img, mask, 新宽度, 新高度, 插值方法)
         
-        delta_w = 目标宽度 - 新宽度
-        delta_h = 目标高度 - 新高度
-        填充区域 = (delta_w, delta_h) != (0, 0)
+        # 保持原始比例缩放
+        宽比 = 目标宽度 / img.width
+        高比 = 目标高度 / img.height
+        比例 = min(宽比, 高比)
         
+        新宽度 = round(img.width * 比例)
+        新高度 = round(img.height * 比例)
+        
+        img_scaled = img.resize((新宽度, 新高度), self.获取插值方法(插值方法))
+        mask_scaled = mask.resize((新宽度, 新高度), self.获取插值方法(插值方法))
+        
+        # 创建新图像并居中放置缩放后的图像
+        new_img = Image.new("RGB", (目标宽度, 目标高度), color=填充色)
+        new_mask = Image.new("L", (目标宽度, 目标高度), color=0)
+        
+        左边 = (目标宽度 - 新宽度) // 2
+        顶边 = (目标高度 - 新高度) // 2
+        
+        new_img.paste(img_scaled, (左边, 顶边))
+        new_mask.paste(mask_scaled, (左边, 顶边))
+        
+        # 创建扩展遮罩
         扩展遮罩 = Image.new("L", (目标宽度, 目标高度), 0)
-        if 填充区域:
-            img = ImageOps.pad(img, (目标宽度, 目标高度), color=填充色, centering=(0.5, 0.5))
-            mask = ImageOps.pad(mask, (目标宽度, 目标高度), color=0, centering=(0.5, 0.5))
-            mask_arr = np.zeros((目标高度, 目标宽度), dtype=np.uint8)
-            if delta_h > 0:
-                mask_arr[:delta_h//2, :] = 255
-                mask_arr[-(delta_h - delta_h//2):, :] = 255
-            if delta_w > 0:
-                mask_arr[:, :delta_w//2] = 255
-                mask_arr[:, -(delta_w - delta_w//2):] = 255
-            扩展遮罩 = Image.fromarray(mask_arr)
+        draw = ImageDraw.Draw(扩展遮罩)
         
-        return img, mask, 扩展遮罩, 填充区域
+        # 填充区域在顶部和底部
+        if 新高度 < 目标高度:
+            顶部填充高度 = (目标高度 - 新高度) // 2
+            底部填充高度 = 目标高度 - 新高度 - 顶部填充高度
+            draw.rectangle([0, 0, 目标宽度, 顶部填充高度], fill=255)
+            draw.rectangle([0, 目标高度 - 底部填充高度, 目标宽度, 目标高度], fill=255)
+        
+        # 填充区域在左侧和右侧
+        if 新宽度 < 目标宽度:
+            左侧填充宽度 = (目标宽度 - 新宽度) // 2
+            右侧填充宽度 = 目标宽度 - 新宽度 - 左侧填充宽度
+            draw.rectangle([0, 0, 左侧填充宽度, 目标高度], fill=255)
+            draw.rectangle([目标宽度 - 右侧填充宽度, 0, 目标宽度, 目标高度], fill=255)
+        
+        填充区域 = (新宽度 < 目标宽度) or (新高度 < 目标高度)
+        
+        return new_img, new_mask, 扩展遮罩, 填充区域
+
+    def 获取插值方法(self, 插值名称):
+        插值映射 = {
+            "双线性插值": Image.BILINEAR,
+            "双三次插值": Image.BICUBIC,
+            "邻近-精确": Image.NEAREST,
+            "Lanczos": Image.LANCZOS,
+            "区域": Image.BOX
+        }
+        return 插值映射.get(插值名称, Image.LANCZOS)
 
 def tensor2pil(image):
     return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
