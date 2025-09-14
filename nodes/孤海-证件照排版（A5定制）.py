@@ -37,8 +37,8 @@ class GuHaiIDPhotoLayout:
             }
         }
     
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("排版图像",)
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("排版图像", "尺寸名")
     FUNCTION = "layout_photos"
     CATEGORY = "孤海定制"
     
@@ -424,7 +424,7 @@ class GuHaiIDPhotoLayout:
                     y = start_y + row * (photo2_height + spacing)
                     canvas.paste(cropped_img2, (x, y))
         
-        # 添加文件名文字（如果文字大小不为0）
+        # 添加文件名和尺寸名文字（如果文字大小不为0）
         if 文字大小 > 0 and 字体 and 字体 != "无可用字体":
             try:
                 # 加载字体
@@ -433,16 +433,19 @@ class GuHaiIDPhotoLayout:
                 font_path = os.path.join(parent_dir, "fonts", 字体)
                 font_obj = ImageFont.truetype(font_path, 文字大小)
                 
+                # 创建组合文本：文件名 + " | " + 尺寸选择
+                display_text = f"{文件名} | {尺寸选择}"
+                
                 # 计算文字位置（所有照片底部Y值+0.5厘米）
                 text_y = start_y + total_height + self.cm_to_pixel(0.5, DPI)
                 
                 # 水平居中
-                text_bbox = draw.textbbox((0, 0), 文件名, font=font_obj)
+                text_bbox = draw.textbbox((0, 0), display_text, font=font_obj)
                 text_width = text_bbox[2] - text_bbox[0]
                 text_x = (canvas_width - text_width) // 2
                 
                 # 绘制文字（黑色）
-                draw.text((text_x, text_y), 文件名, font=font_obj, fill=(0, 0, 0))
+                draw.text((text_x, text_y), display_text, font=font_obj, fill=(0, 0, 0))
             except Exception as e:
                 print(f"添加文字时出错: {e}")
         
@@ -450,7 +453,8 @@ class GuHaiIDPhotoLayout:
         canvas_np = np.array(canvas).astype(np.float32) / 255.0
         canvas_tensor = torch.from_numpy(canvas_np).unsqueeze(0)
         
-        return (canvas_tensor,)
+        # 返回排版图像和尺寸名
+        return (canvas_tensor, 尺寸选择)
 
 # 节点注册
 NODE_CLASS_MAPPINGS = {
@@ -460,4 +464,3 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "孤海-证件照排版（A5定制）": "孤海-证件照排版（A5定制）"
 }
-    
