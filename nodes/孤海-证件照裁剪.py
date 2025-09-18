@@ -17,18 +17,19 @@ class CropIDPhotoNode:
                 "肩膀高度": ("FLOAT", {"default": 0.30, "min": 0.0, "max": 0.5, "step": 0.01}),
                 "单位": (["厘米", "像素"], {"default": "厘米"}),
                 "采样点阈值": ("INT", {"default": 5, "min": 1, "max": 20, "step": 1}),
+                "高低肩筛选": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
             "optional": {
                 "参考遮罩": ("MASK",),
             }
         }
     
-    RETURN_TYPES = ("IMAGE", "MASK", "BOOLEAN")
-    RETURN_NAMES = ("图像", "扩图遮罩", "是否扩展")
+    RETURN_TYPES = ("IMAGE", "MASK", "BOOLEAN", "BOOLEAN")
+    RETURN_NAMES = ("图像", "扩图遮罩", "是否扩展", "高低肩")
     FUNCTION = "crop_photo"
     CATEGORY = "孤海工具箱"
 
-    def crop_photo(self, image, mask, 宽度, 高度, dpi, 头顶距离, 肩膀高度, 单位, 采样点阈值, 参考遮罩=None):
+    def crop_photo(self, image, mask, 宽度, 高度, dpi, 头顶距离, 肩膀高度, 单位, 采样点阈值, 高低肩筛选, 参考遮罩=None):
         # 单位转换
         if 单位 == "厘米":
             target_width = int(宽度 * dpi / 2.54 + 0.5)
@@ -52,7 +53,7 @@ class CropIDPhotoNode:
         if len(x_indices) == 0 or len(y_indices) == 0:
             # 返回全黑扩图遮罩和False
             black_mask = torch.zeros((1, target_height, target_width), dtype=torch.float32)
-            return (image, black_mask, False)
+            return (image, black_mask, False, False)
         
         # 找到人像顶部位置
         y_min = np.min(y_indices)
@@ -285,10 +286,40 @@ class CropIDPhotoNode:
         if pad_bottom > 0:
             draw.rectangle([(0, int(total_height)-pad_bottom), (crop_width, int(total_height))], fill=255)
         
+        # 创建人像遮罩（用于高低肩检测）
+        portrait_mask = Image.new("L", (crop_width, int(total_height)), 0)
+        if paste_width > 0 and paste_height > 0:
+            # 从原始mask中裁剪对应区域
+            mask_cropped = mask_img.crop((actual_crop_x0, actual_crop_y0, actual_crop_x1, actual_crop_y1))
+            portrait_mask.paste(mask_cropped, (paste_x, paste_y))
+        
         # 缩放至目标尺寸
         if new_img.size != (target_width, target_height):
             new_img = new_img.resize((target_width, target_height), Image.LANCZOS)
             expansion_mask = expansion_mask.resize((target_width, target_height), Image.NEAREST)
+            portrait_mask = portrait_mask.resize((target_width, target_height), Image.NEAREST)
+        
+        # 高低肩检测
+        has_uneven_shoulders = False
+        if pad_left == 0 and pad_right == 0:  # 只有当左右没有扩展时才检测
+            portrait_mask_np = np.array(portrait_mask)
+            
+            # 找到左边界上的最小Y坐标（白色像素）
+            left_edge = portrait_mask_np[:, 0]
+            left_y_indices = np.where(left_edge > 128)[0]
+            left_min_y = left_y_indices.min() if len(left_y_indices) > 0 else None
+            
+            # 找到右边界上的最小Y坐标（白色像素）
+            right_edge = portrait_mask_np[:, -1]
+            right_y_indices = np.where(right_edge > 128)[0]
+            right_min_y = right_y_indices.min() if len(right_y_indices) > 0 else None
+            
+            # 计算Y坐标差值的绝对值
+            if left_min_y is not None and right_min_y is not None:
+                y_diff = abs(left_min_y - right_min_y)
+                threshold = target_height * 高低肩筛选
+                if y_diff > threshold:
+                    has_uneven_shoulders = True
         
         # 转换回ComfyUI格式
         cropped_np = np.array(new_img).astype(np.float32) / 255.0
@@ -301,7 +332,7 @@ class CropIDPhotoNode:
         # 检查是否有扩展
         has_expansion = pad_left > 0 or pad_top > 0 or pad_right > 0 or pad_bottom > 0
         
-        return (cropped_tensor, mask_tensor, has_expansion)
+        return (cropped_tensor, mask_tensor, has_expansion, has_uneven_shoulders)
 
 NODE_CLASS_MAPPINGS = {
     "孤海-证件照裁剪": CropIDPhotoNode
