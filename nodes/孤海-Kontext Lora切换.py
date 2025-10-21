@@ -61,7 +61,7 @@ class KontextLoraSwitch:
 《49. 孤海-自动打光-轮廓光加强》【Kontext\孤海-自动打光-轮廓光加强-kontext.safetensors】{Just change the lighting of the picture to backlighting while keeping the facial features and composition of the characters unchanged.}
 《50. 孤海-双 色球 充气》【Kontext\孤海_双 色球_充气_kontext.safetensors】{Change the breasts to huge breasts}
 《51. 孤海-双 色球 巅峰杯》【Kontext\孤海_双 色球_巅峰杯_kontext.safetensors】{Change the breasts to huge breasts}
-
+《52. 孤海-失焦图像高清修复》【Kontext\孤海-跑焦虚焦修复_kontext.safetensors】{Removing the motion blur from the out-of-focus images makes the picture extremely clear}
 
 """
     
