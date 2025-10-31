@@ -41,9 +41,9 @@ class GH_BatchLayout:
                 "分辨率": ("INT", {"default": 300, "min": 72, "max": 1200}),
                 "照片宽度": ("FLOAT", {"default": 3.5, "min": 1.0, "max": 10000.0, "step": 0.1}),
                 "照片高度": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10000.0, "step": 0.1}),
-                "水平间距": ("FLOAT", {"default": 15.0, "min": 0.0, "max": 1000.0, "step": 0.1}),
-                "垂直间距": ("FLOAT", {"default": 15.0, "min": 0.0, "max": 1000.0, "step": 0.1}),
-                "裁剪模式": (["填充", "裁剪"], {"default": "裁剪"}),
+                "水平间距": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 100.0, "step": 0.05}),
+                "垂直间距": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 100.0, "step": 0.05}),
+                "裁剪模式": (["居中裁剪", "靠上裁剪", "靠下裁剪", "填充"], {"default": "居中裁剪"}),
                 "自适应旋转": ("BOOLEAN", {"default": True}),
                 "背景颜色": ("COLOR", {"default": "#FFFFFF"}),
                 "圆角半径": ("INT", {"default": 0, "min": 0, "max": 1000}),
@@ -54,7 +54,7 @@ class GH_BatchLayout:
                 # 新增优先显示选项
                 "优先显示": (["左", "右"], {"default": "左"}),
                 "字体颜色": ("COLOR", {"default": "#000000"}),
-                "字体大小": ("INT", {"default": 24, "min": 5, "max": 150}),
+                "字体大小": ("INT", {"default": 24, "min": 0, "max": 150}),
                 "安全边距": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 200.0, "step": 0.1}),  # 新增安全边距参数
             }
         }
@@ -479,10 +479,21 @@ class GH_BatchLayout:
             if (target_ratio < 1 and orig_ratio > 1) or (target_ratio > 1 and orig_ratio < 1):
                 img = img.rotate(90, expand=True)
         
-        if crop_mode == "裁剪":
-            processed = ImageOps.fit(img, (target_w, target_h), method=Image.Resampling.LANCZOS)
-        else:
+        # 修改裁剪模式处理逻辑
+        if crop_mode == "填充":
             processed = ImageOps.pad(img, (target_w, target_h), color=bg_color, centering=(0.5, 0.5))
+        else:
+            # 设置裁剪位置参数
+            if crop_mode == "居中裁剪":
+                centering = (0.5, 0.5)  # 水平和垂直都居中
+            elif crop_mode == "靠上裁剪":
+                centering = (0.5, 0)    # 水平居中，垂直靠上
+            elif crop_mode == "靠下裁剪":
+                centering = (0.5, 1)    # 水平居中，垂直靠下
+            else:
+                centering = (0.5, 0.5)  # 默认居中
+            
+            processed = ImageOps.fit(img, (target_w, target_h), method=Image.Resampling.LANCZOS, centering=centering)
         
         # 优化圆角处理（4倍超采样）
         if corner_radius > 0:
@@ -498,7 +509,7 @@ class GH_BatchLayout:
             alpha = Image.composite(alpha, Image.new('L', alpha.size, 0), mask)
             processed.putalpha(alpha)
 
-        # 改进的描边处理逻辑
+        # 改进的描边处理逻辑 - 修复叠加顺序问题
         if stroke_size > 0:
             # 使用超采样绘制描边
             scale = 4
@@ -548,8 +559,8 @@ class GH_BatchLayout:
             # 缩小描边层并应用抗锯齿
             stroke_layer = stroke_layer.resize((target_w, target_h), Image.Resampling.LANCZOS)
             
-            # 合并描边层和图像
-            processed = Image.alpha_composite(stroke_layer, processed)
+            # 修复：将描边层放在图像上方，而不是下方
+            processed = Image.alpha_composite(processed, stroke_layer)
 
         return processed
 
