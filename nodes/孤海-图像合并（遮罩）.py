@@ -14,7 +14,6 @@ class GulfSeaImageMergeMask:
             "required": {
                 "背景图": ("IMAGE",),
                 "覆盖图": ("IMAGE",),
-                "遮罩": ("MASK",),
                 "透明度": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
@@ -38,6 +37,9 @@ class GulfSeaImageMergeMask:
                     "default": False
                 }),
             },
+            "optional": {
+                "遮罩": ("MASK",),
+            }
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -129,7 +131,7 @@ class GulfSeaImageMergeMask:
         
         return result
     
-    def merge_images(self, 背景图, 覆盖图, 遮罩, 透明度, 遮罩扩展, 模糊半径, 匹配图像大小):
+    def merge_images(self, 背景图, 覆盖图, 透明度, 遮罩扩展, 模糊半径, 匹配图像大小, 遮罩=None):
         # 转换为PIL图像
         bg_pil = self.tensor_to_pil(背景图)
         ov_pil = self.tensor_to_pil(覆盖图)
@@ -140,17 +142,23 @@ class GulfSeaImageMergeMask:
         if ov_pil.mode != 'RGBA':
             ov_pil = ov_pil.convert('RGBA')
         
-        # 处理遮罩
-        if len(遮罩.shape) == 4:
-            遮罩 = 遮罩[0]
-        if len(遮罩.shape) == 3:
-            遮罩 = 遮罩[0]
-        
-        mask_np = (遮罩.cpu().numpy() * 255).astype(np.uint8)
-        mask_pil = Image.fromarray(mask_np, mode='L')
-        
-        # 调整遮罩大小以匹配背景图
-        mask_pil = mask_pil.resize(bg_pil.size, Image.LANCZOS)
+        # 处理遮罩：如果没有提供遮罩，创建全白遮罩（整个画布范围）
+        if 遮罩 is None:
+            # 创建与背景图相同大小的全白遮罩
+            mask_np = np.ones(bg_pil.size[::-1], dtype=np.uint8) * 255  # 注意：PIL大小是(width, height)，numpy是(height, width)
+            mask_pil = Image.fromarray(mask_np, mode='L')
+        else:
+            # 处理提供的遮罩
+            if len(遮罩.shape) == 4:
+                遮罩 = 遮罩[0]
+            if len(遮罩.shape) == 3:
+                遮罩 = 遮罩[0]
+            
+            mask_np = (遮罩.cpu().numpy() * 255).astype(np.uint8)
+            mask_pil = Image.fromarray(mask_np, mode='L')
+            
+            # 调整遮罩大小以匹配背景图
+            mask_pil = mask_pil.resize(bg_pil.size, Image.LANCZOS)
         
         # 应用遮罩扩展
         if 遮罩扩展 != 0:
