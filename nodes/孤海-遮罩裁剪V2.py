@@ -387,6 +387,29 @@ class 孤海_裁剪恢复:
     FUNCTION = "恢复图像"
     CATEGORY = "孤海工具箱"
     
+    def tensor2pil(self, image):
+        """将tensor转换为PIL图像"""
+        return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+    
+    def pil2tensor(self, image):
+        """将PIL图像转换为tensor"""
+        return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+    
+    def image_to_rgb(self, images):
+        """将图像转换为RGB格式"""
+        if len(images) > 1:
+            tensors = []
+            for image in images:
+                pil_image = self.tensor2pil(image)
+                pil_image = pil_image.convert('RGB')
+                tensors.append(self.pil2tensor(pil_image))
+            tensors = torch.cat(tensors, dim=0)
+            return (tensors, )
+        else:
+            pil_image = self.tensor2pil(images)
+            pil_image = pil_image.convert('RGB')
+            return (self.pil2tensor(pil_image), )
+    
     def 计算百分比像素值(self, 百分比, 遮罩宽, 遮罩高):
         """将百分比转换为像素值，基于遮罩白色区域宽高的平均值"""
         if 百分比 == 0:
@@ -432,6 +455,13 @@ class 孤海_裁剪恢复:
         return 羽化遮罩
     
     def 恢复图像(self, 接缝, 裁剪图像, 遮罩扩展百分比, 遮罩羽化百分比, 背景图像=None):
+        # 添加RGB转换功能
+        裁剪图像_rgb = self.image_to_rgb(裁剪图像)[0]
+        if 背景图像 is not None:
+            背景图像_rgb = self.image_to_rgb(背景图像)[0]
+        else:
+            背景图像_rgb = None
+        
         # 获取接缝数据
         原始高, 原始宽 = 接缝["原像素"]
         裁剪顶部, 裁剪底部, 裁剪左侧, 裁剪右侧 = 接缝["裁剪区域"]
@@ -457,18 +487,19 @@ class 孤海_裁剪恢复:
         遮罩羽化 = self.计算百分比像素值(遮罩羽化百分比, 遮罩白色区域宽, 遮罩白色区域高)
         
         # 获取背景图像
-        if 背景图像 is not None:
+        if 背景图像_rgb is not None:
             # 检查背景图像尺寸是否匹配
-            背景高, 背景宽 = 背景图像.shape[1:3]
+            背景高, 背景宽 = 背景图像_rgb.shape[1:3]
             if 背景高 != 原始高 or 背景宽 != 原始宽:
                 raise ValueError(f"背景图像尺寸({背景宽}x{背景高})与原始图像尺寸({原始宽}x{原始高})不匹配")
-            背景 = 背景图像[0].cpu().numpy()
+            背景 = 背景图像_rgb[0].cpu().numpy()
         else:
-            # 使用接缝中的原始图像
-            背景 = 原始图像[0].cpu().numpy()
+            # 使用接缝中的原始图像作为背景，也需要转换为RGB
+            原始图像_rgb = self.image_to_rgb(原始图像)[0]
+            背景 = 原始图像_rgb[0].cpu().numpy()
         
         # 转换裁剪图像为numpy
-        裁剪_np = 裁剪图像[0].cpu().numpy()
+        裁剪_np = 裁剪图像_rgb[0].cpu().numpy()
         处理高, 处理宽 = 裁剪_np.shape[:2]
         
         强制匹配尺寸 = True  # 硬编码为True
