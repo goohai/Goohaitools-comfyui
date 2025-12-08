@@ -30,7 +30,7 @@ class GuHaiIDPhotoLayout:
                 ),
                 "DPI": ("INT", {"default": 300, "min": 72, "max": 3000, "step": 1}),
                 "描边宽度": ("INT", {"default": 1, "min": 0, "max": 50, "step": 1}),
-                "描边颜色": ("COLOR", {"default": "#000000"}),
+                "描边颜色": ("COLORCODE", {"default": "#364254"}),
                 "文件名": ("STRING", {"default": "证件照"}),
                 "字体": (font_files,) if font_files else (["无可用字体"],),
                 "文字大小": ("INT", {"default": 12, "min": 0, "max": 100, "step": 1})

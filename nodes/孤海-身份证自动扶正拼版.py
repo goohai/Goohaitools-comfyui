@@ -259,7 +259,7 @@ class IDCardCorrectionAndComposition:
                 "水印文字": ("STRING", {"default": "机密文件", "multiline": True}),
                 "水印字体": (font_list, {"default": font_list[0]}),
                 "水印大小": ("INT", {"default": 48, "min": 0, "max": 1000, "step": 1}),
-                "水印颜色": ("COLOR", {"default": "#808080"}),
+                "水印颜色": ("COLORCODE", {"default": "#808080"}),
                 "水印不透明度": ("INT", {"default": 50, "min": 0, "max": 100, "step": 1}),
                 "水印间距": ("INT", {"default": 150, "min": 10, "max": 1000, "step": 10}),
                 "水印角度": ("INT", {"default": 45, "min": -90, "max": 90, "step": 1}),

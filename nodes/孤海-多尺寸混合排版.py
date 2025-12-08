@@ -56,11 +56,11 @@ class MultiSizeLayoutNode_ZH:
                 "—————": ("STRING", {"default": "————————————", "multiline": False}),
                 "照片间距": ("INT", {"default": 10, "min": 0, "max": 100, "label": "照片间距"}),
                 "描边宽度": ("INT", {"default": 1, "min": 0, "max": 50, "label": "描边像素"}),
-                "描边颜色": ("COLOR", {"default": "#000000", "label": "描边颜色"}),
+                "描边颜色": ("COLORCODE", {"default": "#000000", "label": "描边颜色"}),
                 "文件名": ("STRING", {"default": "", "multiline": False, "label": "文件名"}),
                 "字体": (get_font_list(), {"default": "默认字体", "label": "字体"}),
                 "文字大小": ("INT", {"default": 0, "min": 0, "max": 100, "label": "文字大小"}),
-                "文字颜色": ("COLOR", {"default": "#000000", "label": "文字颜色"}),
+                "文字颜色": ("COLORCODE", {"default": "#000000", "label": "文字颜色"}),
             },
         }
 

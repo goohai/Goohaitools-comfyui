@@ -17,7 +17,7 @@ class 孤海图像缩放按像素:
                 "缩放模式": (["拉伸", "裁剪", "填充"], {"default": "裁剪"}),
                 "执行条件": (["总是", "最长边大于时", "最小边小于时"], {"default": "总是"}),
                 "启用填充色": ("BOOLEAN", {"default": False}),
-                "填充颜色": ("COLOR", {"default": "#ffffff"}),
+                "填充颜色": ("COLORCODE", {"default": "#364254"}),
                 "自适应旋转": ("BOOLEAN", {"default": False}),
                 "整除数": ("INT", {"default": 0, "min": 0, "max": 256}),
             },

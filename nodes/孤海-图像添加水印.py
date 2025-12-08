@@ -34,7 +34,7 @@ class 孤海_图像添加水印:
                 "垂直位置": (["居中", "靠上", "靠下"],),
                 "X偏移百分比": ("INT", {"default": 0, "min": 0, "max": 50, "step": 1}),
                 "Y偏移百分比": ("INT", {"default": 0, "min": 0, "max": 50, "step": 1}),
-                "文字颜色": ("COLOR", {"default": "#FFFFFF"}),
+                "文字颜色": ("COLORCODE", {"default": "#FFFFFF"}),
                 "水印平铺": ("BOOLEAN", {"default": False}),
                 "水印角度": ("INT", {"default": 0, "min": -90, "max": 90, "step": 1}),
                 "水印间距": ("INT", {"default": 10, "min": 0, "max": 50, "step": 1}),

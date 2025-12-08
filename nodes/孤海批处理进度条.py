@@ -29,9 +29,9 @@ class GuhaiBatchProgress:
             "required": {
                 "total": ("INT", {"default": 5, "min": 1}),
                 "current": ("INT", {"default": 1, "min": 1}),
-                "background_color": ("COLOR", {"default": "#242730"}),
-                "progress_color": ("COLOR", {"default": "#1aeaac"}),
-                "text_color": ("COLOR", {"default": "#1aeaac"}),
+                "background_color": ("COLORCODE", {"default": "#242730"}),
+                "progress_color": ("COLORCODE", {"default": "#1aeaac"}),
+                "text_color": ("COLORCODE", {"default": "#1aeaac"}),
                 "font_size": ("INT", {"default": 300, "min": 100, "max": 512}),
                 "font_name": (fonts if fonts else ["default"],),
             }

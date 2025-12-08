@@ -15,8 +15,8 @@ class 孤海取色器:
         return {
             "required": {
                 "模式": (["纯色", "上下渐变", "中心渐变"], {"default": "纯色"}),
-                "主色": ("COLOR", {"default": "#3498db"}),
-                "辅色": ("COLOR", {"default": "#e74c3c"})
+                "主色": ("COLORCODE", {"default": "#213d50"}),
+                "辅色": ("COLORCODE", {"default": "#402633"})
             }
         }
     

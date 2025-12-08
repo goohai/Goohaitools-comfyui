@@ -45,15 +45,15 @@ class GH_BatchLayout:
                 "垂直间距": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 100.0, "step": 0.05}),
                 "裁剪模式": (["居中裁剪", "靠上裁剪", "靠下裁剪", "填充"], {"default": "居中裁剪"}),
                 "自适应旋转": ("BOOLEAN", {"default": True}),
-                "背景颜色": ("COLOR", {"default": "#FFFFFF"}),
+                "背景颜色": ("COLORCODE", {"default": "#FFFFFF"}),
                 "圆角半径": ("INT", {"default": 0, "min": 0, "max": 1000}),
                 "描边像素": ("INT", {"default": 0, "min": 0, "max": 50}),
-                "描边颜色": ("COLOR", {"default": "#000000"}),
+                "描边颜色": ("COLORCODE", {"default": "#364254"}),
                 "显示文件名": (["关闭", "仅显示文件名", "文件名+扩展", "路径+文件名", "路径+文件名+扩展", "仅显示路径名", "路径名+第一张图像名"], {"default": "关闭"}),
                 "字体选择": (fonts, {"default": "默认"}),
                 # 新增优先显示选项
                 "优先显示": (["左", "右"], {"default": "左"}),
-                "字体颜色": ("COLOR", {"default": "#000000"}),
+                "字体颜色": ("COLORCODE", {"default": "#000000"}),
                 "字体大小": ("INT", {"default": 24, "min": 0, "max": 150}),
                 "安全边距": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 200.0, "step": 0.1}),  # 新增安全边距参数
             }

@@ -19,7 +19,7 @@ class RemoveBackgroundWithMask:
                 "遮罩裁剪": ("BOOLEAN", {"default": True}),
                 "裁剪系数": ("FLOAT", {"default": 1.2, "min": 1.0, "max": 2.0, "step": 0.1}),
                 "图像描边": ("INT", {"default": 0, "min": 0, "max": 512}),
-                "描边颜色": ("COLOR", {"default": "#FFFFFF"}),
+                "描边颜色": ("COLORCODE", {"default": "#364254"}),
             }
         }
     

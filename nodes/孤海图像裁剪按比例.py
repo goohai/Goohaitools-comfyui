@@ -17,7 +17,7 @@ class 孤海图像裁剪按比例:
                 "缩放插值": (["双线性插值", "双三次插值", "区域", "邻近-精确", "Lanczos"], {"default": "Lanczos"}),
                 "缩放模式": (["裁剪", "填充"], {"default": "裁剪"}),
                 "启用填充色": ("BOOLEAN", {"default": True}),
-                "填充颜色": ("COLOR", {"default": "#ffffff"}),
+                "填充颜色": ("COLORCODE", {"default": "#364254"}),
                 "自适应旋转": ("BOOLEAN", {"default": False}),
             },
             "optional": {
