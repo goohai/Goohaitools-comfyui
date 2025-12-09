@@ -7,6 +7,9 @@ from pathlib import Path
 current_dir = Path(__file__).parent
 nodes_dir = current_dir / "nodes"
 
+# 设置WEB目录路径 - 这是关键配置
+WEB_DIRECTORY = "./web"
+
 # 初始化全局映射字典
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -41,3 +44,6 @@ for file_path in nodes_dir.glob("*.py"):
         continue
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
+
+# 打印加载信息
+print(f'\033[92m[GoohaiTools]\033[0m \033[93m{len(NODE_CLASS_MAPPINGS)} nodes\033[0m loaded | \033[94mColorWidget enabled\033[0m')
