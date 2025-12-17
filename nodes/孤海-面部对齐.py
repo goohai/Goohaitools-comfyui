@@ -39,7 +39,7 @@ class GuHaiFaceAlignment:
             self.mp_face_mesh = mp.solutions.face_mesh
             self.face_mesh = self.mp_face_mesh.FaceMesh(
                 static_image_mode=True,
-                max_num_faces=1,
+                max_num_faces=5,  # 增加最大检测人脸数
                 refine_landmarks=True,
                 min_detection_confidence=0.5
             )
@@ -59,8 +59,13 @@ class GuHaiFaceAlignment:
         
         return abs(area) / 2.0
 
+    def calculate_distance_to_center(self, face_center, image_center):
+        """计算人脸中心点到图像中心的距离"""
+        return math.sqrt((face_center[0] - image_center[0])**2 + 
+                        (face_center[1] - image_center[1])**2)
+
     def detect_face_with_mesh(self, image_np, confidence_threshold):
-        """使用FaceMesh检测人脸并返回边界框和关键点"""
+        """使用FaceMesh检测人脸并返回边界框和关键点，选择最靠近中心的人脸"""
         if not HAS_MEDIAPIPE or self.face_mesh is None:
             return None
             
@@ -68,9 +73,12 @@ class GuHaiFaceAlignment:
         results = self.face_mesh.process(image_rgb)
         
         if results.multi_face_landmarks:
+            h, w, _ = image_np.shape
+            image_center = (w // 2, h // 2)  # 图像中心点
+            
+            detected_faces = []  # 存储所有检测到的人脸信息
+            
             for face_landmarks in results.multi_face_landmarks:
-                h, w, _ = image_np.shape
-                
                 # 提取所有关键点
                 all_points = []
                 for landmark in face_landmarks.landmark:
@@ -89,7 +97,7 @@ class GuHaiFaceAlignment:
                 face_contour_points = [all_points[i] for i in face_contour_indices if i < len(all_points)]
                 
                 if len(face_contour_points) < 5:
-                    return None
+                    continue
                 
                 # 计算面部轮廓面积（不包含耳朵）
                 face_area = self.calculate_polygon_area(face_contour_points)
@@ -113,6 +121,11 @@ class GuHaiFaceAlignment:
                 # 计算面部中心点（基于面部轮廓中心）
                 face_center_x = np.mean(xs)
                 face_center_y = np.mean(ys)
+                
+                # 计算到图像中心的距离
+                distance_to_center = self.calculate_distance_to_center(
+                    (face_center_x, face_center_y), image_center
+                )
                 
                 # 提取关键点用于角度计算
                 keypoints = []
@@ -146,15 +159,24 @@ class GuHaiFaceAlignment:
                 else:
                     keypoints.append((x_min + width // 2, y_min + 2 * height // 3))
                 
-                return {
+                face_info = {
                     "bbox": (x_min, y_min, width, height),
                     "keypoints": keypoints,
                     "center": (int(face_center_x), int(face_center_y)),
                     "face_width": width,
                     "face_height": height,
                     "face_area": face_area,
-                    "face_contour_points": face_contour_points
+                    "face_contour_points": face_contour_points,
+                    "distance_to_center": distance_to_center  # 添加距离信息
                 }
+                detected_faces.append(face_info)
+            
+            # 选择最靠近图像中心的人脸
+            if detected_faces:
+                # 按距离排序，选择距离最小的
+                detected_faces.sort(key=lambda x: x["distance_to_center"])
+                return detected_faces[0]  # 返回最靠近中心的人脸
+            
         return None
 
     def calculate_rotation_angle(self, keypoints):
