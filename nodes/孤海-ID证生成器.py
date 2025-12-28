@@ -23,7 +23,7 @@ class IDInfoNode:
     RETURN_TYPES = ("ID_INFO", "STRING")
     RETURN_NAMES = ("个人信息", "提示词")
     FUNCTION = "generate_id_info"
-    CATEGORY = "孤海工具/证件生成"
+    CATEGORY = "孤海工具箱"
 
     def generate_id_info(self, 姓名, 性别, 民族, 出生日期, 住址, 证号):
         # 验证出生日期格式
@@ -86,7 +86,7 @@ class IDCardGenerator:
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("图像", "蒙版")
     FUNCTION = "generate_id_card"
-    CATEGORY = "孤海工具/证件生成"
+    CATEGORY = "孤海工具箱"
 
     def generate_id_card(self, 模板图, 头像, 个人信息, 输出透明背景):
         # 从个人信息中提取字段

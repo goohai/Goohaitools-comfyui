@@ -24,7 +24,7 @@ class 孤海_图像嵌入:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("图像",)
     FUNCTION = "process_image"
-    CATEGORY = "image"
+    CATEGORY = "孤海工具箱"
     DESCRIPTION = "将嵌入图像按照遮罩区域嵌入到背景图中"
 
     def process_image(self, 背景图, 嵌入图, 嵌入遮罩, 嵌入方式, 嵌入到, 输出通道):

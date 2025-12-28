@@ -37,7 +37,7 @@ class 孤海Kontext比例节点:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("比例",)  # 输出端名称改为"比例"
     FUNCTION = "获取比例"
-    CATEGORY = "孤海-Kontext"
+    CATEGORY = "孤海工具箱"
 
     def 获取比例(self, 比例选择):
         # 直接返回选择的字符串

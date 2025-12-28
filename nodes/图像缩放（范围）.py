@@ -24,7 +24,7 @@ class 图像缩放范围孤海:
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("图像", "遮罩")
     FUNCTION = "resize_image_range"
-    CATEGORY = "image/transform/孤海"
+    CATEGORY = "孤海工具箱"
     DESCRIPTION = "把图像与遮罩尺寸限制到指定范围 - 支持多种限制模式的高质量图像缩放"
     
     def resize_image_range(self, 图像=None, 遮罩=None, 限制模式="长边", 最小尺寸=1024, 最大尺寸=3000, 整除数=0):
