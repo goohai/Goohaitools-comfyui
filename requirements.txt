@@ -1,3 +1,6 @@
 opencv-python
 dlib
+scipy
+scikit-image
+matplotlib
 mediapipe==0.10.21
