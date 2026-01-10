@@ -32,12 +32,60 @@ class 图像缩放V2_孤海:
     CATEGORY = "孤海工具箱"
 
     def 执行缩放(self, 图像, 缩放方法, 宽度, 高度, 将边缩放到, 缩放插值, 缩放模式, 固定方向, 执行条件, 填充颜色, 整除数, 遮罩=None):
-        img = tensor2pil(图像)
+        # 处理批次图像
+        batch_size = 图像.shape[0]
+        原高度, 原宽度 = 图像.shape[1], 图像.shape[2]
+        
+        # 处理输入遮罩
+        if 遮罩 is not None:
+            mask_batch_size = 遮罩.shape[0]
+            # 如果遮罩批次大小与图像不匹配，调整遮罩
+            if mask_batch_size != batch_size:
+                if mask_batch_size == 1:
+                    遮罩 = 遮罩.repeat(batch_size, 1, 1)
+                else:
+                    raise ValueError(f"遮罩批次大小({mask_batch_size})与图像批次大小({batch_size})不匹配")
+        else:
+            # 创建默认遮罩
+            遮罩 = torch.zeros((batch_size, 原高度, 原宽度), dtype=torch.float32)
+        
+        # 存储处理后的结果
+        processed_images = []
+        processed_masks = []
+        最终宽度, 最终高度 = 0, 0
+        
+        # 对批次中的每张图像单独处理
+        for i in range(batch_size):
+            img_tensor = 图像[i].unsqueeze(0)  # 保持4D张量格式
+            mask_tensor = 遮罩[i].unsqueeze(0) if 遮罩 is not None else None
+            
+            # 处理单张图像
+            result = self.处理单张图像(
+                img_tensor, mask_tensor, 缩放方法, 宽度, 高度, 将边缩放到, 
+                缩放插值, 缩放模式, 固定方向, 执行条件, 填充颜色, 整除数
+            )
+            
+            processed_images.append(result[0])
+            processed_masks.append(result[3])
+            
+            # 记录最终尺寸（批次中所有图像应该相同）
+            if i == 0:
+                最终宽度, 最终高度 = result[1], result[2]
+        
+        # 合并批次结果
+        output_images = torch.cat(processed_images, dim=0)
+        output_masks = torch.cat(processed_masks, dim=0)
+        
+        return (output_images, 最终宽度, 最终高度, output_masks)
+
+    def 处理单张图像(self, 图像, 遮罩, 缩放方法, 宽度, 高度, 将边缩放到, 缩放插值, 缩放模式, 固定方向, 执行条件, 填充颜色, 整除数):
+        """处理单张图像的缩放逻辑"""
+        img = self.tensor2pil(图像)
         原宽度, 原高度 = img.size
         
         # 处理输入遮罩
         if 遮罩 is not None:
-            mask_pil = tensor2mask(遮罩)
+            mask_pil = self.tensor2mask(遮罩)
             if mask_pil.size != (原宽度, 原高度):
                 mask_pil = mask_pil.resize((原宽度, 原高度), Image.NEAREST)
         else:
@@ -129,8 +177,8 @@ class 图像缩放V2_孤海:
                     mask_pil = mask_pil.crop((左边, 顶边, 右边, 底边))
                     新宽度, 新高度 = 整除宽度, 整除高度
 
-        img_tensor = pil2tensor(img)
-        mask_tensor = pil2mask(mask_pil)
+        img_tensor = self.pil2tensor(img)
+        mask_tensor = self.pil2mask(mask_pil)
 
         return (img_tensor, 新宽度, 新高度, mask_tensor)
 
@@ -519,17 +567,42 @@ class 图像缩放V2_孤海:
         }
         return 插值映射.get(插值名称, Image.LANCZOS)
 
-def tensor2pil(image):
-    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+    def tensor2pil(self, image):
+        """处理批次和单张图像的tensor到PIL转换"""
+        if len(image.shape) == 4:
+            # 批次图像: (batch, height, width, channels)
+            # 提取单张图像
+            image = image[0]  # 取批次中的第一张
+        
+        # 转换为numpy数组并处理
+        image_np = image.cpu().numpy()
+        image_np = np.clip(255. * image_np, 0, 255).astype(np.uint8)
+        return Image.fromarray(image_np)
 
-def tensor2mask(mask):
-    return Image.fromarray(np.clip(255. * mask.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+    def tensor2mask(self, mask):
+        """处理批次和单张遮罩的tensor到PIL转换"""
+        if len(mask.shape) == 3:
+            # 批次遮罩: (batch, height, width)
+            # 提取单张遮罩
+            mask = mask[0]  # 取批次中的第一张
+        elif len(mask.shape) == 4:
+            # 批次遮罩: (batch, 1, height, width) 或其他格式
+            mask = mask[0, 0] if mask.shape[1] == 1 else mask[0]
+        
+        # 转换为numpy数组并处理
+        mask_np = mask.cpu().numpy()
+        mask_np = np.clip(255. * mask_np, 0, 255).astype(np.uint8)
+        return Image.fromarray(mask_np, mode='L')
 
-def pil2tensor(image):
-    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+    def pil2tensor(self, image):
+        """PIL图像转换为tensor"""
+        image_np = np.array(image).astype(np.float32) / 255.0
+        return torch.from_numpy(image_np).unsqueeze(0)  # 添加批次维度
 
-def pil2mask(image):
-    return torch.from_numpy(np.array(image.convert("L")).astype(np.float32) / 255.0).unsqueeze(0)
+    def pil2mask(self, image):
+        """PIL遮罩转换为tensor"""
+        image_np = np.array(image.convert("L")).astype(np.float32) / 255.0
+        return torch.from_numpy(image_np).unsqueeze(0)  # 添加批次维度
 
 NODE_CLASS_MAPPINGS = {"图像缩放V2_孤海": 图像缩放V2_孤海}
 NODE_DISPLAY_NAME_MAPPINGS = {"图像缩放V2_孤海": "图像缩放V2 孤海"}
