@@ -395,7 +395,7 @@ class 图像缩放V2_孤海:
         new_img.paste(img_scaled, (左边, 顶边))
         new_mask.paste(mask_scaled, (左边, 顶边))
         
-        # 扩展边缘像素
+        # 修复：传递正确的参数（新宽度和新高度）
         new_img = self.扩展边缘像素(new_img, 左边, 顶边, 新宽度, 新高度)
         
         return new_img, new_mask

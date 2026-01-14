@@ -254,13 +254,66 @@ class 孤海Seg次序过滤:
         
         num_segments = len(sorted_segs)
         
-        # 处理过滤数量为0的情况
+        # 修改：当过滤数量为0时，输出从开始索引以后的所有seg
         if 过滤数量 == 0:
-            # 返回空的SEGS和全黑mask
-            h, w = image_shape
-            empty_mask = torch.zeros((h, w), dtype=torch.float32)
-            empty_segs = (image_shape, [])
-            return (empty_segs, empty_mask)
+            # 计算实际要获取的分割区域索引（从开始索引到末尾）
+            if 开始索引 >= num_segments:
+                # 开始索引超出范围，返回空的SEGS和全黑mask
+                h, w = image_shape
+                empty_mask = torch.zeros((h, w), dtype=torch.float32)
+                empty_segs = (image_shape, [])
+                return (empty_segs, empty_mask)
+            
+            # 获取从开始索引到末尾的所有seg
+            selected_indices = list(range(开始索引, num_segments))
+            selected_segs = [sorted_segs[idx] for idx in selected_indices]
+            
+            # 创建新的SEGS
+            new_segs = (image_shape, selected_segs)
+            
+            # 创建完整的mask
+            if not selected_segs:
+                # 如果没有选中的seg，返回全黑mask
+                h, w = image_shape
+                empty_mask = torch.zeros((h, w), dtype=torch.float32)
+                return (new_segs, empty_mask)
+            elif len(selected_segs) == 1:
+                # 单个seg，直接创建mask
+                seg = selected_segs[0]
+                mask = self.get_segment_mask(seg)
+                crop_region = seg.crop_region
+                
+                # 确保mask是2D
+                if mask.dim() == 3:
+                    mask = mask[0] if mask.shape[0] == 1 else mask
+                if mask.dim() == 3:
+                    mask = mask.squeeze(0)
+                
+                # 获取crop区域坐标
+                x1, y1, x2, y2 = crop_region
+                
+                # 调整mask尺寸以匹配crop区域
+                crop_h, crop_w = y2 - y1, x2 - x1
+                if mask.shape != (crop_h, crop_w):
+                    mask = torch.nn.functional.interpolate(
+                        mask.unsqueeze(0).unsqueeze(0),
+                        size=(crop_h, crop_w),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze(0).squeeze(0)
+                
+                # 创建全图mask
+                h, w = image_shape
+                full_mask = torch.zeros((h, w), dtype=torch.float32)
+                if y1 >= 0 and y2 <= h and x1 >= 0 and x2 <= w:
+                    full_mask[y1:y2, x1:x2] = mask
+                merged_mask = full_mask
+            else:
+                # 多个seg，合并mask
+                crop_regions = [seg.crop_region for seg in selected_segs]
+                merged_mask = self.create_full_mask(image_shape, selected_segs, crop_regions)
+            
+            return (new_segs, merged_mask)
         
         # 限制过滤数量不超过实际分割数量
         过滤数量 = min(过滤数量, num_segments)
