@@ -1,6 +1,7 @@
+-i https://pypi.tuna.tsinghua.edu.cn/simple
 opencv-python
-dlib
 scipy
 scikit-image
 matplotlib
-mediapipe==0.10.21
+mediapipe>=0.10.20
+dlib-bin>=19.24.6 
