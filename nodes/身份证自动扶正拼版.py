@@ -236,6 +236,23 @@ def get_font_list():
     font_names.insert(0, "默认字体")
     return font_names
 
+def hex_to_rgb(hex_color):
+    """将十六进制颜色代码转换为RGB元组"""
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 6:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return (r, g, b, 255)  # 返回RGBA元组，alpha固定为255
+    elif len(hex_color) == 3:
+        r = int(hex_color[0]*2, 16)
+        g = int(hex_color[1]*2, 16)
+        b = int(hex_color[2]*2, 16)
+        return (r, g, b, 255)
+    else:
+        # 格式错误时返回白色
+        return (255, 255, 255, 255)
+
 class IDCardCorrectionAndComposition:
     @classmethod
     def INPUT_TYPES(cls):
@@ -263,6 +280,7 @@ class IDCardCorrectionAndComposition:
                 "水印不透明度": ("INT", {"default": 50, "min": 0, "max": 100, "step": 1}),
                 "水印间距": ("INT", {"default": 150, "min": 10, "max": 1000, "step": 10}),
                 "水印角度": ("INT", {"default": 45, "min": -90, "max": 90, "step": 1}),
+                "背景色": ("COLORCODE", {"default": "#FFFFFF"}),
             },
             "optional": {
                 "back_image": ("IMAGE",),
@@ -277,7 +295,7 @@ class IDCardCorrectionAndComposition:
     def process(self, front_image, front_mask, 
                 back_image=None, back_mask=None,
                 自动对比度强度=0, 自动色调强度=0,
-                画布宽_cm=21.0, 画布高_cm=29.7, 图像间距_cm=1.0,
+                画布宽_cm=21.0, 画布高_cm=29.7, 背景色="#FFFFFF", 图像间距_cm=1.0,
                 阴影大小=5, 阴影模糊=5, 阴影不透明度=128, 黑白=False,
                 水印开关=False, 水印文字="机密文件", 水印字体="默认字体", 水印大小=48, 
                 水印颜色="#808080", 水印不透明度=50, 水印间距=150, 水印角度=45):
@@ -292,6 +310,9 @@ class IDCardCorrectionAndComposition:
         canvas_width_px = cm_to_pixels(画布宽_cm, dpi)
         canvas_height_px = cm_to_pixels(画布高_cm, dpi)
         spacing_px = cm_to_pixels(图像间距_cm, dpi)
+        
+        # 将背景色从十六进制转换为RGBA元组
+        bg_color = hex_to_rgb(背景色)
         
         # 应用自动对比度和色调调整
         if 自动对比度强度 > 0 or 自动色调强度 > 0:
@@ -315,8 +336,8 @@ class IDCardCorrectionAndComposition:
             if back_corrected is None:
                 raise ValueError("无法处理背面身份证图像")
         
-        # 创建白色画布
-        canvas = Image.new('RGBA', (canvas_width_px, canvas_height_px), (255, 255, 255, 255))
+        # 创建自定义背景色的画布
+        canvas = Image.new('RGBA', (canvas_width_px, canvas_height_px), bg_color)
         
         # 计算圆角半径（用于阴影）
         radius = int(min(id_width_px, id_height_px) * 0.07)

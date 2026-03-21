@@ -38,7 +38,7 @@ class SaveImageJPG_GH:
 ④ %BATCH_INDEX% - 批次内序号   
 举例：  
  %date:yyyy年M月dd日%/测试_%time:hhmmss% → 在output下自动新建"2026年1月20日"文件夹，并保存为：测试_143022.jpg  
- %date:YYmmdd%\%date:mmdd%-%time:hhmmss% → 在output下新建"260120"文件夹，并保存为：0120-143022.jpg  
+ %date:YYmmdd%/%date:mmdd%-%time:hhmmss% → 在output下新建"260120"文件夹，并保存为：0120-143022.jpg  
  （支持绝对路径）D:\桌面\批量输出\高清_%time:h时m分s秒% → D:\桌面\批量输出\高清_8时12分56秒.jpg
 """
     
