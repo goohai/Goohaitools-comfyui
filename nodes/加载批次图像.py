@@ -5,8 +5,8 @@ from PIL import Image, ImageOps
 import folder_paths
 
 class 孤海加载批次图像:
-    """ 智能图像批次加载器，支持EXIF方向校正与相对路径输出 """
-    
+    """ 智能图像批次加载器，支持EXIF方向校正、格式筛选与图片总数统计 """
+
     def __init__(self):
         self.内部计数器 = 0
         self.历史模式 = None
@@ -23,22 +23,22 @@ class 孤海加载批次图像:
                     "display_name": "图片目录"
                 }),
                 "起始索引": ("INT", {
-                    "default": 0, 
+                    "default": 0,
                     "min": 0,
-                    "display_name": "基准序号"
+                    "display_name": "开始索引"
                 }),
-                "加载模式": (["单张模式", "递增模式"], {"default": "单张模式"}),
+                "加载模式": (["单张模式", "递增模式"], {"default": "递增模式"}),
                 "保留透明通道": ("BOOLEAN", {
                     "default": False,
                     "display_name": "RGBA模式"
                 }),
                 "包含子文件夹": ("BOOLEAN", {
-                    "default": False,
+                    "default": True,
                     "display_name": "扫描子目录"
                 }),
                 "显示扩展名": ("BOOLEAN", {
-                    "default": True,
-                    "display_name": "包含后缀"
+                    "default": False,
+                    "display_name": "文件名含后缀"
                 }),
                 "自定义扩展名": ("STRING", {
                     "default": "",
@@ -48,15 +48,31 @@ class 孤海加载批次图像:
                     "default": False,
                     "display_name": "重置递增序号"
                 }),
+                # 新增功能1：随机种子（用于触发刷新）
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xffffffffffffffff,
+                    "display_name": "随机种子"
+                }),
+                # 新增功能2：图像格式筛选
+                "图像筛选": (["全部", "JPG", "PNG", "BMP", "GIF", "TIFF", "Webp", "JPG和PNG"], {
+                    "default": "全部",
+                    "display_name": "图像筛选"
+                }),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("图像", "文件名", "图像路径", "扩展名", "路径+文件名", "序号")
+    # 修改：增加一个“图像总数”的整数输出
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING", "STRING", "INT", "INT")
+    RETURN_NAMES = ("图像", "文件名", "图像路径", "扩展名", "路径+文件名", "序号", "图像总数")
     FUNCTION = "加载图片"
     CATEGORY = "孤海工具箱"
 
-    def 加载图片(self, 文件夹路径, 起始索引, 加载模式, 保留透明通道, 包含子文件夹, 显示扩展名, 自定义扩展名, 重置递增):
+    def 加载图片(self, 文件夹路径, 起始索引, 加载模式, 保留透明通道, 包含子文件夹, 显示扩展名, 自定义扩展名, 重置递增, seed, 图像筛选):
+        # 随机种子不参与实际计算，仅用于触发刷新（来自第一个代码）
+        # 实际逻辑开始
+
         # 处理模式切换和缓存清理
         if self.历史模式 != 加载模式 or (重置递增 and not self.重置递增标记):
             self.递增总次数 = 0
@@ -64,10 +80,13 @@ class 孤海加载批次图像:
             self.历史模式 = 加载模式
             self.重置递增标记 = True if 重置递增 else False
 
-        # 构建图片列表
-        图片列表 = self.遍历目录(文件夹路径, 包含子文件夹)
+        # 根据“图像筛选”选项，确定有效的文件扩展名集合
+        有效后缀 = self.获取有效后缀(图像筛选)
+
+        # 构建图片列表（传入筛选后的后缀集合）
+        图片列表 = self.遍历目录(文件夹路径, 包含子文件夹, 有效后缀)
         if not 图片列表:
-            raise ValueError("❌❌ 目录中未发现有效图片文件")
+            raise ValueError("❌❌ 目录中未发现符合筛选条件的图片文件")
         总数 = len(图片列表)
 
         # 特殊重置递增逻辑
@@ -86,7 +105,7 @@ class 孤海加载批次图像:
                 序号 = 实际索引 + 1
 
         选中路径 = 图片列表[实际索引]
-        
+
         # 图像处理（新增EXIF方向校正）
         图像对象 = Image.open(选中路径)
         # 应用EXIF方向信息自动旋转图像
@@ -94,7 +113,7 @@ class 孤海加载批次图像:
         # 转换为指定通道模式
         图像对象 = 图像对象.convert("RGBA" if 保留透明通道 else "RGB")
         图像张量 = torch.from_numpy(np.array(图像对象).astype(np.float32) / 255.0)[None,]
-        
+
         # 路径处理
         基础路径 = os.path.normpath(文件夹路径)
         相对路径 = os.path.relpath(选中路径, 基础路径).replace("\\", "/")
@@ -111,10 +130,11 @@ class 孤海加载批次图像:
         if 重置递增:
             self.重置递增标记 = False
 
-        return (图像张量, 文件名, os.path.dirname(选中路径), 最终扩展名, 相对路径, 序号)
+        # 返回结果，包括新增的“图像总数”
+        return (图像张量, 文件名, os.path.dirname(选中路径), 最终扩展名, 相对路径, 序号, 总数)
 
-    def 遍历目录(self, 路径, 包含子目录):
-        有效后缀 = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'}
+    def 遍历目录(self, 路径, 包含子目录, 有效后缀集合):
+        """遍历目录，根据给定的有效后缀集合筛选文件"""
         文件列表 = []
         if os.path.isdir(路径):
             walk_method = os.walk(路径) if 包含子目录 else [next(os.walk(路径))]
@@ -122,9 +142,33 @@ class 孤海加载批次图像:
                 文件列表.extend(
                     os.path.join(根目录, f)
                     for f in 文件
-                    if os.path.splitext(f)[-1].lower() in 有效后缀
+                    if os.path.splitext(f)[-1].lower() in 有效后缀集合
                 )
         return sorted(文件列表)
+
+    def 获取有效后缀(self, 筛选选项):
+        """根据图像筛选选项，返回对应的有效文件扩展名集合"""
+        所有支持后缀 = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tiff', '.tif'}
+
+        if 筛选选项 == "全部":
+            return 所有支持后缀
+        elif 筛选选项 == "JPG":
+            return {'.jpg', '.jpeg'}
+        elif 筛选选项 == "PNG":
+            return {'.png'}
+        elif 筛选选项 == "BMP":
+            return {'.bmp'}
+        elif 筛选选项 == "GIF":
+            return {'.gif'}
+        elif 筛选选项 == "TIFF":
+            return {'.tiff', '.tif'}
+        elif 筛选选项 == "Webp":
+            return {'.webp'}
+        elif 筛选选项 == "JPG和PNG":
+            return {'.jpg', '.jpeg', '.png'}
+        else:
+            # 默认返回全部支持格式
+            return 所有支持后缀
 
 NODE_CLASS_MAPPINGS = {"GuHai_ImageLoaderPro": 孤海加载批次图像}
 NODE_DISPLAY_NAME_MAPPINGS = {"GuHai_ImageLoaderPro": "孤海-加载批次图像"}

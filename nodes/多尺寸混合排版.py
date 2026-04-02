@@ -54,7 +54,7 @@ class MultiSizeLayoutNode_ZH:
                 "排列方向3": (["下", "右"], {"default": "下", "label": "排列方位"}),
                 "旋转3": ("BOOLEAN", {"default": False, "label": "旋转90度"}),
                 "—————": ("STRING", {"default": "————————————", "multiline": False}),
-                "照片间距": ("INT", {"default": 10, "min": 0, "max": 100, "label": "照片间距"}),
+                "照片间距": ("INT", {"default": 10, "min": 0, "max": 300, "label": "照片间距"}),
                 "描边宽度": ("INT", {"default": 1, "min": 0, "max": 50, "label": "描边像素"}),
                 "描边颜色": ("COLORCODE", {"default": "#000000", "label": "描边颜色"}),
                 "文件名": ("STRING", {"default": "", "multiline": False, "label": "文件名"}),
@@ -75,12 +75,14 @@ class MultiSizeLayoutNode_ZH:
         canvas_h = convert_units(kwargs["画布高度"], unit, dpi)
         
         img = tensor2pil(kwargs["image"])
-        regions = []
+        regions = []  # 存储所有区域（照片和文字）的最终绘制信息
+        photo_regions = [] # 专门存储照片区域的信息（用于计算照片整体边界）
+        text_region_info = None # 存储文字区域的信息（位置和图片）
         self.prev_groups = []
 
         # 处理照片组
         group1_regions = self.process_photo_group(img, kwargs, 1, {'x':0,'y':0})
-        regions += group1_regions
+        photo_regions += group1_regions
         if group1_regions:
             self.prev_groups.append(self.get_group_boundary(group1_regions))
 
@@ -88,7 +90,7 @@ class MultiSizeLayoutNode_ZH:
             if kwargs[f"宽度{group_num}"] > 0 and kwargs[f"高度{group_num}"] > 0:
                 group_regions = self.process_secondary_group(img, kwargs, group_num, self.prev_groups)
                 if group_regions:
-                    regions += group_regions
+                    photo_regions += group_regions
                     self.prev_groups.append(self.get_group_boundary(group_regions))
 
         # 文字处理优化
@@ -129,22 +131,23 @@ class MultiSizeLayoutNode_ZH:
                 draw.text((0, 0), kwargs["文件名"], font=font, fill=text_color)
 
             # 计算文字位置
-            if regions:
-                # 获取所有照片组的整体边界
-                all_min_x = min(r[0] for r in regions)
-                all_max_x = max(r[2] for r in regions)
-                all_max_y = max(r[3] for r in regions)
-                
-                text_x = all_min_x + (all_max_x - all_min_x - text_w) // 2  # 相对照片组水平居中
-                text_y = all_max_y + spacing
-            else:
-                text_x = (canvas_w - text_w) // 2
-                text_y = spacing
+            # === 优化点：将文字水平位置计算改为在整个画布上居中，而不是在照片区域内居中 ===
+            # 无论是否有照片，文字都在整个画布宽度上水平居中
+            text_x = (canvas_w - text_w) // 2
 
-            regions.append((text_x, text_y, text_x + text_w, text_y + text_h, text_img))
+            # 确保文字不会超出画布底部
+            text_y = int(canvas_h * 0.98) 
+            if text_y < 0:
+                text_y = 0
+            if text_y + text_h > canvas_h:
+                text_y = canvas_h - text_h
+            # === 修改结束 ===
+
+            # 保存文字区域信息，暂时不添加到总的regions列表，将在center_all中统一处理
+            text_region_info = (text_x, text_y, text_x + text_w, text_y + text_h, text_img)
 
         # 创建最终画布并设置DPI
-        canvas = self.center_all(canvas_w, canvas_h, regions)
+        canvas = self.center_all(canvas_w, canvas_h, photo_regions, text_region_info)
         canvas = canvas.convert("RGB")
         canvas.info['dpi'] = (dpi, dpi)
         
@@ -308,26 +311,65 @@ class MultiSizeLayoutNode_ZH:
             width=width
         )
 
-    def center_all(self, canvas_w, canvas_h, regions):
-        if not regions:
-            return Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
-
-        min_x = min(r[0] for r in regions)
-        max_x = max(r[2] for r in regions)
-        min_y = min(r[1] for r in regions)
-        max_y = max(r[3] for r in regions)
-
-        content_width = max_x - min_x
-        content_height = max_y - min_y
-        offset_x = (canvas_w - content_width) // 2 - min_x
-        offset_y = (canvas_h - content_height) // 2 - min_y
-
+    def center_all(self, canvas_w, canvas_h, photo_regions, text_region_info):
+       
+        # 创建画布
         canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
-        for x1, y1, x2, y2, img in regions:
+        
+        # 如果没有照片，直接处理文字（如果有）并返回
+        if not photo_regions:
+            if text_region_info:
+                x1, y1, x2, y2, img = text_region_info
+                if img.mode == 'RGBA':
+                    canvas.paste(img, (x1, y1), img)
+                else:
+                    canvas.paste(img, (x1, y1))
+            return canvas
+
+        # 计算照片整体的边界
+        photo_min_x = min(r[0] for r in photo_regions)
+        photo_max_x = max(r[2] for r in photo_regions)
+        photo_min_y = min(r[1] for r in photo_regions)
+        photo_max_y = max(r[3] for r in photo_regions)
+        
+        photo_content_width = photo_max_x - photo_min_x
+        photo_content_height = photo_max_y - photo_min_y
+
+        # 确定文字区域的顶部位置（如果存在文字）
+        text_top = canvas_h
+        if text_region_info:
+            text_top = text_region_info[1]  # 文字的Y坐标（顶部）
+
+        # 计算照片整体在垂直方向上的居中位置
+        # 可用垂直空间 = 文字顶部 - 0 (画布顶部)
+        available_vertical_space = text_top - 0
+        # 照片整体需要在这个空间内垂直居中
+        target_photo_center_y = available_vertical_space // 2
+        current_photo_center_y = photo_min_y + photo_content_height // 2
+        # 计算垂直偏移量
+        offset_y = target_photo_center_y - current_photo_center_y
+
+        # 保持原有水平居中逻辑
+        target_photo_center_x = canvas_w // 2
+        current_photo_center_x = photo_min_x + photo_content_width // 2
+        offset_x = target_photo_center_x - current_photo_center_x
+
+        # 应用偏移量到所有照片区域
+        for x1, y1, x2, y2, img in photo_regions:
+            new_x1 = x1 + offset_x
+            new_y1 = y1 + offset_y
             if img.mode == 'RGBA':
-                canvas.paste(img, (x1 + offset_x, y1 + offset_y), img)
+                canvas.paste(img, (new_x1, new_y1), img)
             else:
-                canvas.paste(img, (x1 + offset_x, y1 + offset_y))
+                canvas.paste(img, (new_x1, new_y1))
+
+        # 绘制文字（位置保持不变，即绝对坐标）
+        if text_region_info:
+            x1, y1, x2, y2, img = text_region_info
+            if img.mode == 'RGBA':
+                canvas.paste(img, (x1, y1), img)
+            else:
+                canvas.paste(img, (x1, y1))
 
         return canvas
 
