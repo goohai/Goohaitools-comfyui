@@ -347,43 +347,51 @@ class GuHaiIDPhotoCrop:
         return 0
 
     def get_optimized_border_color(self, image_np):
+        """
+        修改后的边框颜色采样逻辑：
+        从上边界向下取10个像素高的区域作为采样区域，
+        排除颜色反差较大的颜色后取平均色。
+        """
         h, w, _ = image_np.shape
-        top_edge = image_np[0, :, :]
-        bottom_edge = image_np[h-1, :, :]
-        left_edge = image_np[:, 0, :]
-        right_edge = image_np[:, w-1, :]
 
-        border_pixels = np.concatenate([top_edge, bottom_edge, left_edge, right_edge])
-        rounded_colors = np.round(border_pixels / 10) * 10
+        # 确保采样区域高度不超过图像高度
+        sample_height = min(10, h)
 
-        color_counts = {}
-        for i in range(len(rounded_colors)):
-            color_tuple = tuple(rounded_colors[i])
-            color_counts[color_tuple] = color_counts.get(color_tuple, 0) + 1
+        # 从上边界向下取10个像素高的矩形区域
+        top_region = image_np[0:sample_height, :, :]
 
-        if not color_counts:
+        # 将采样区域重塑为像素列表
+        pixels = top_region.reshape(-1, 3)
+
+        if len(pixels) == 0:
             return (255, 255, 255)
 
-        sorted_colors = sorted(color_counts.items(), key=lambda x: x[1], reverse=True)
-        top_colors = sorted_colors[:min(5, len(sorted_colors))]
+        # 计算所有像素的平均颜色作为参考
+        avg_color = np.mean(pixels, axis=0)
 
-        total_r, total_g, total_b = 0, 0, 0
-        total_weight = 0
+        # 计算每个像素与平均颜色的欧氏距离
+        distances = np.sqrt(np.sum((pixels - avg_color) ** 2, axis=1))
 
-        for color_tuple, count in top_colors:
-            r, g, b = color_tuple
-            total_r += r * count
-            total_g += g * count
-            total_b += b * count
-            total_weight += count
+        # 计算距离的统计信息
+        mean_distance = np.mean(distances)
+        std_distance = np.std(distances)
 
-        if total_weight > 0:
-            avg_r = int(total_r / total_weight)
-            avg_g = int(total_g / total_weight)
-            avg_b = int(total_b / total_weight)
-            return (avg_r, avg_g, avg_b)
+        # 设置阈值：排除距离超过平均值+1.5倍标准差的像素（颜色反差较大的）
+        threshold = mean_distance + 1.5 * std_distance
 
-        return (255, 255, 255)
+        # 筛选距离在阈值内的像素
+        valid_pixels = pixels[distances <= threshold]
+
+        # 如果筛选后没有像素，则使用所有像素
+        if len(valid_pixels) == 0:
+            valid_pixels = pixels
+
+        # 计算有效像素的平均颜色
+        avg_r = int(np.mean(valid_pixels[:, 0]))
+        avg_g = int(np.mean(valid_pixels[:, 1]))
+        avg_b = int(np.mean(valid_pixels[:, 2]))
+
+        return (avg_r, avg_g, avg_b)
 
     def parse_color(self, color_str):
         try:
