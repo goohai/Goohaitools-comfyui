@@ -36,16 +36,38 @@ class GuHaiIDPhotoCrop:
         return {
             "required": {
                 "图像": ("IMAGE",),
-                "尺寸限制": ("INT", {"default": 2000, "min": 512, "max": 5120, "step": 1, "display": "number"}),
-                "面部置信度": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1}),
                 "人脸矫正": ("BOOLEAN", {"default": True}),
+                "预设尺寸": ([
+                    "1寸（2.5 x 3.5 厘米）",
+                    "大1寸（3.3 x 4.8 厘米）",
+                    "小2寸（3.5 x 4.5 厘米）",
+                    "2寸（3.5 x 4.9 厘米）",
+                    "大2寸（3.5 x 5.3 厘米）",
+                    "3寸（5.5 x 8.5 厘米）",
+                    "5寸（8.9 x 12.7 厘米）",
+                    "6寸（10.1 x 15.2 厘米）",
+                    "身份证社保（2.6 x 3.2 厘米）",
+                    "驾驶证（2.2 x 3.2 厘米）",
+                    "日签（4.5 x 4.5 厘米）",
+                    "美签（5.1 x 5.1 厘米）",
+                    "研究生考试（3.0 x 4.0 厘米）",
+                    "身份证电子（358 x 441 像素 DPI: 350）",
+                    "普通话考试（390 x 567 像素 DPI: 300）",
+                    "教师资格证（480 x 640 像素 DPI: 300）",
+                    "护士资格证（160 x 210 像素 DPI: 300）",
+                    "司法考试照（413 x 626 像素 DPI: 300）",
+                    "执业医考照（354 x 472 像素 DPI: 300）",
+                    "自定义尺寸"
+                ], {"default": "1寸（2.5 x 3.5 厘米）"}),
+                "自定义宽": ("FLOAT", {"default": 0.00, "min": 0.00, "max": 4096.00, "step": 0.01, "display": "number", "round": 0.01}),
+                "自定义高": ("FLOAT", {"default": 0.00, "min": 0.00, "max": 4096.00, "step": 0.01, "display": "number", "round": 0.01}),
                 "单位": (["厘米", "像素"], {"default": "厘米"}),
-                "证件照宽": ("FLOAT", {"default": 2.50, "min": 1.00, "max": 4096.00, "step": 0.01, "display": "number", "round": 0.01}),
-                "证件照高": ("FLOAT", {"default": 3.50, "min": 1.00, "max": 4096.00, "step": 0.01, "display": "number", "round": 0.01}),
                 "DPI": ("INT", {"default": 600, "min": 72, "max": 2000, "step": 1, "display": "number"}),
                 "脸部大小": ("FLOAT", {"default": 0.42, "min": 0.3, "max": 0.8, "step": 0.05, "display": "slider"}),
                 "垂直偏移": ("FLOAT", {"default": 0.38, "min": 0.3, "max": 0.5, "step": 0.05, "display": "slider"}),
+                "尺寸限制": ("INT", {"default": 2000, "min": 512, "max": 5120, "step": 1, "display": "number"}),
                 "填充模式": (["自定义颜色", "边框颜色"], {"default": "边框颜色"}),
+
 
             },
             "optional": {
@@ -414,7 +436,7 @@ class GuHaiIDPhotoCrop:
             pass
         return (255, 255, 255)
 
-    def crop_face_idphoto(self, 图像, 面部置信度, 人脸矫正, 填充模式, 脸部大小, 垂直偏移, 单位, 证件照宽, 证件照高, DPI, 尺寸限制, 自定义填充色="#364254"):
+    def crop_face_idphoto(self, 图像, 人脸矫正, 填充模式, 脸部大小, 垂直偏移, 单位, 自定义宽, 自定义高, DPI, 尺寸限制, 预设尺寸, 自定义填充色="#364254"):
         """证件照裁剪主函数"""
         if not HAS_MEDIAPIPE:
             print("错误: mediapipe未安装，请先运行: pip install mediapipe")
@@ -452,8 +474,8 @@ class GuHaiIDPhotoCrop:
         # 转换为BGR用于人脸检测
         target_np_bgr = cv2.cvtColor(target_np_rgb, cv2.COLOR_RGB2BGR)
 
-        # 检测人脸
-        target_face = self.detect_face_with_mesh(target_np_bgr, 面部置信度)
+        # 检测人脸 (固定使用0.3置信度)
+        target_face = self.detect_face_with_mesh(target_np_bgr, 0.3)
 
         if target_face is None:
             print("警告: 未检测到人脸，返回原图。")
@@ -470,13 +492,53 @@ class GuHaiIDPhotoCrop:
         else:
             fill_color = self.get_optimized_border_color(target_np_rgb)
 
+        # ===== 步骤1: 根据预设尺寸处理单位、宽高和DPI =====
+        final_unit = 单位
+        final_width = 自定义宽
+        final_height = 自定义高
+        final_dpi = DPI
+
+        if 预设尺寸 != "自定义尺寸":
+            # 解析预设字符串，提取尺寸和单位
+            # 示例: "1寸（2.5 x 3.5 厘米）" 或 "身份证电子（358 x 441 像素 DPI: 350）"
+            try:
+                # 提取括号内的内容
+                start_idx = 预设尺寸.find('（')
+                end_idx = 预设尺寸.find('）')
+                if start_idx != -1 and end_idx != -1:
+                    content = 预设尺寸[start_idx+1:end_idx]
+                    # 判断是厘米还是像素
+                    if '厘米' in content:
+                        # 厘米格式: "2.5 x 3.5 厘米"
+                        parts = content.replace('厘米', '').strip().split('x')
+                        if len(parts) == 2:
+                            final_width = float(parts[0].strip())
+                            final_height = float(parts[1].strip())
+                            final_unit = "厘米"
+                            # DPI保持用户输入的final_dpi
+                    elif '像素' in content:
+                        # 像素格式: "358 x 441 像素 DPI: 350"
+                        # 先分离像素部分和DPI部分
+                        pixel_part = content.split('像素')[0].strip()  # "358 x 441"
+                        dpi_part = content.split('DPI:')[-1].strip() if 'DPI:' in content else "300"  # "350"
+
+                        parts = pixel_part.split('x')
+                        if len(parts) == 2:
+                            final_width = float(parts[0].strip())
+                            final_height = float(parts[1].strip())
+                            final_unit = "像素"
+                            final_dpi = int(dpi_part)  # 使用预设的DPI，忽略用户输入的DPI
+            except Exception as e:
+                print(f"警告: 解析预设尺寸失败，使用自定义尺寸。错误: {e}")
+                # 如果解析失败，保持用户输入的值不变
+
         # 计算输出图像尺寸（像素）
-        if 单位 == "厘米":
-            output_width_px = int(round(证件照宽 * DPI / 2.54))
-            output_height_px = int(round(证件照高 * DPI / 2.54))
-        else:
-            output_width_px = int(证件照宽)
-            output_height_px = int(证件照高)
+        if final_unit == "厘米":
+            output_width_px = int(round(final_width * final_dpi / 2.54))
+            output_height_px = int(round(final_height * final_dpi / 2.54))
+        else:  # 像素
+            output_width_px = int(final_width)
+            output_height_px = int(final_height)
 
         # 获取关键点
         keypoints = target_face["keypoints"]
@@ -648,7 +710,7 @@ class GuHaiIDPhotoCrop:
         mask_np = np.array(final_mask_pil, dtype=np.float32) / 255.0
         mask_tensor = torch.from_numpy(mask_np)[None, ...]
 
-        return (result_tensor, has_expansion, mask_tensor, DPI)
+        return (result_tensor, has_expansion, mask_tensor, final_dpi)
 
 
 # 节点注册
