@@ -9,7 +9,6 @@ app.registerExtension({
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
-            // ★ 设置节点初始宽度为400，高度保持原有值
             this.size = [400, this.size[1]];
             buildIgnoreGroupsUI(this);
         };
@@ -611,8 +610,24 @@ function buildIgnoreGroupsUI(node) {
                     return;
                 }
 
-                const anyActive = nodes.some(n => isNodeActive(n));
-                if (anyActive) newSet.push(g.title);
+                // ★ 非对称判断逻辑：
+                //   - OFF → ON：组内所有节点都活跃时才开启（every）
+                //   - ON → OFF：组内所有节点都不活跃时才关闭（!some）
+                //   只要还有至少一个节点活跃，组开关就保持不变
+                const wasOn = activeSet.includes(g.title);
+                if (wasOn) {
+                    // 组当前是开启的：只有全部节点都不活跃才关闭
+                    const anyActive = nodes.some(n => isNodeActive(n));
+                    if (anyActive) {
+                        newSet.push(g.title);
+                    }
+                } else {
+                    // 组当前是关闭的：只有全部节点都活跃才开启
+                    const allActive = nodes.every(n => isNodeActive(n));
+                    if (allActive) {
+                        newSet.push(g.title);
+                    }
+                }
             });
 
             const oldSorted = [...activeSet].sort().join("\x00");
@@ -623,11 +638,26 @@ function buildIgnoreGroupsUI(node) {
             }
         } else if (mode === "always_one" || mode === "at_most_one") {
             let foundActive = null;
-            for (const g of list) {
-                const nodes = collectNodes(g);
-                if (nodes.length > 0 && nodes.some(n => isNodeActive(n))) {
-                    foundActive = g.title;
-                    break;
+
+            // 优先检查当前活跃组：只要还有至少一个节点活跃就保持不变
+            if (active) {
+                const currentGrp = list.find(g => g.title === active);
+                if (currentGrp) {
+                    const nodes = collectNodes(currentGrp);
+                    if (nodes.length === 0 || nodes.some(n => isNodeActive(n))) {
+                        foundActive = currentGrp.title;
+                    }
+                }
+            }
+
+            // 如果当前活跃组已全部关闭（或无活跃组），寻找全部节点都活跃的组
+            if (!foundActive) {
+                for (const g of list) {
+                    const nodes = collectNodes(g);
+                    if (nodes.length > 0 && nodes.every(n => isNodeActive(n))) {
+                        foundActive = g.title;
+                        break;
+                    }
                 }
             }
 

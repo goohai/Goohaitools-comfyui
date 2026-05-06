@@ -31,23 +31,23 @@ import { app } from "../../../scripts/app.js";
     z-index:3;
     text-shadow:0 1px 3px rgba(0,0,0,.6);
 }
-/* 名称部分：14px，固定颜色，不加粗 */
+/* 名称部分：16px，固定颜色，不加粗 */
 .ghs-lbl-name{
-    font-size:14px;
+    font-size:16px;
     color:#B2B7BD;
     font-weight:400;
 }
-/* 数值部分：16px，使用滑条颜色，加粗 */
+/* 数值部分：20px，使用滑条颜色，加粗 */
 .ghs-lbl-val{
-    font-size:16px;
+    font-size:20px;
     color:var(--gs-c);
     font-weight:700;
 }
 
-/* ── 轨道 6px ── */
+/* ── 轨道 10px ── */
 .ghs-track{
-    position:relative;height:6px;background:#1a1a1a;
-    border-radius:3px;cursor:pointer;
+    position:relative;height:10px;background:#1a1a1a;
+    border-radius:6px;cursor:pointer;
     box-shadow:inset 0 1px 2px rgba(0,0,0,.5);
     margin-top:22px;
 }
@@ -59,12 +59,12 @@ import { app } from "../../../scripts/app.js";
     pointer-events:none;
 }
 .ghs-fill{
-    position:absolute;left:0;top:0;bottom:0;border-radius:3px;
+    position:absolute;left:0;top:0;bottom:0;border-radius:6px;
     background:var(--gs-c);pointer-events:none;
 }
-/* ── 圆点 10px ── */
+/* ── 圆点 16px ── */
 .ghs-thumb{
-    position:absolute;top:50%;width:10px;height:10px;
+    position:absolute;top:50%;width:16px;height:16px;
     background:#f5f0e8;border:2px solid var(--gs-c);border-radius:50%;
     transform:translate(-50%,-50%);cursor:grab;
     box-shadow:0 1px 4px rgba(0,0,0,.4);
@@ -215,6 +215,16 @@ function syncWidgetType(node) {
     g.widget.value = v;
 }
 
+/**
+ * 同步隐藏的 output_type widget，使 Python 端收到正确的输出类型
+ */
+function syncOutputType(node) {
+    const g = node._gs;
+    if (!g || !g.outputTypeWidget) return;
+    const isInt = node.properties.sliderType === "int";
+    g.outputTypeWidget.value = isInt ? "int" : "float";
+}
+
 // ── 设置选项 ─────────────────────────────────
 function showSettings(node) {
     document.querySelectorAll(".ghs-overlay").forEach((e) => e.remove());
@@ -356,6 +366,9 @@ function showSettings(node) {
         /* 同步 widget 类型标记 */
         syncWidgetType(node);
 
+        /* 同步 output_type 隐藏 widget */
+        syncOutputType(node);
+
         updateVis(node);
         node.setDirtyCanvas(true, true);
         ov.remove();
@@ -395,6 +408,31 @@ function setupSlider(node) {
         dw.computeSize = () => [0, 0];
     }
 
+    /* ── 关键：主动创建 output_type 隐藏 widget ── */
+    let outputTypeWidget = node.widgets
+        ? node.widgets.find((w) => w.name === "output_type")
+        : null;
+    if (!outputTypeWidget) {
+        node.addWidget(
+            "combo",
+            "output_type",
+            isInt ? "int" : "float",
+            function () {},
+            { values: ["float", "int"] }
+        );
+        outputTypeWidget = node.widgets
+            ? node.widgets.find((w) => w.name === "output_type")
+            : null;
+    }
+    if (outputTypeWidget) {
+        outputTypeWidget.value       = isInt ? "int" : "float";
+        outputTypeWidget.type        = "hidden";
+        outputTypeWidget.hidden      = true;
+        outputTypeWidget.computeSize = () => [0, 0];
+        outputTypeWidget.draw        = function () {};
+        outputTypeWidget.mouse       = function () { return false; };
+    }
+
     /* ── 节点外观 ── */
     node.color   = "#2D384D";
     node.bgcolor = "#2D384D";
@@ -403,14 +441,34 @@ function setupSlider(node) {
     const origFG = node.onDrawForeground;
     node.onDrawForeground = function (ctx) {
         const th = (typeof LiteGraph !== "undefined" && LiteGraph.NODE_TITLE_HEIGHT) || 30;
+        const r  = (typeof LiteGraph !== "undefined" && LiteGraph.NODE_ROUND_RADIUS) || 24;
+        const w  = this.size[0];
+        const x  = 0;
+        const y  = -th;
+        const fw = w;
+        const fh = th + 2;
+
+        /* 使用带圆角的路径（仅上方两角圆角，下方直角）来覆盖标题区域 */
         ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + fw - r, y);
+        ctx.arcTo(x + fw, y, x + fw, y + r, r);
+        ctx.lineTo(x + fw, y + fh);
+        ctx.lineTo(x, y + fh);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+        ctx.closePath();
         ctx.fillStyle = "#2D384D";
-        ctx.fillRect(0, -th, this.size[0], th + 2);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.save();
         ctx.font         = "20px 'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif";
         ctx.fillStyle    = "#E3E3E3";
         ctx.textAlign    = "center";
         ctx.textBaseline = "top";
-        ctx.fillText(this.title || "", this.size[0] / 2, -th + 12);
+        ctx.fillText(this.title || "", w / 2, -th + 12);
         ctx.restore();
         if (origFG) origFG.call(this, ctx);
     };
@@ -455,14 +513,16 @@ function setupSlider(node) {
     wrap.appendChild(track);
 
     node._gs = {
-        container: wrap, widget: dw,
+        container: wrap, widget: dw, outputTypeWidget: outputTypeWidget,
         fill, glow, thumb, nameEl, valTextEl, track,
         dragging: false,
     };
 
-
     /* 同步 widget 类型标记 */
     syncWidgetType(node);
+
+    /* 同步 output_type 隐藏 widget */
+    syncOutputType(node);
 
     /* ── 交互逻辑 ── */
     function valFromEvt(e) {
@@ -484,7 +544,7 @@ function setupSlider(node) {
 
     /* 拖拽 —— 仅左键触发 */
     track.addEventListener("mousedown", (e) => {
-        if (e.button !== 0) return;          
+        if (e.button !== 0) return;
         e.preventDefault();
         e.stopPropagation();
         node._gs.dragging = true;
@@ -507,8 +567,6 @@ function setupSlider(node) {
         document.addEventListener("mousemove", onMove);
         document.addEventListener("mouseup", onUp);
     });
-
-
 
     /* 双击打开设置 */
     wrap.addEventListener("dblclick", (e) => {
@@ -536,7 +594,10 @@ function setupSlider(node) {
         if (name === "值") updateVis(this);
     };
 
-    node.setSize([Math.max(node.size[0], 220), node.size[1]]);
+    // ── 宽度和高度各增加 10% ──
+    const newWidth  = Math.round(Math.max(node.size[0], 220) * 1.1);
+    const newHeight = Math.round(node.size[1] * 1.1);
+    node.setSize([newWidth, newHeight]);
 }
 
 // ── 注册扩展 ──────────────────────────────────
@@ -599,6 +660,9 @@ app.registerExtension({
 
             /* 同步 widget 类型标记 */
             syncWidgetType(this);
+
+            /* 同步 output_type 隐藏 widget */
+            syncOutputType(this);
 
             updateVis(this);
         };
