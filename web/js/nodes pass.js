@@ -18,13 +18,30 @@ app.registerExtension({
             origConfigure?.apply(this, arguments);
             if (this._guhaiSyncGroups) this._guhaiSyncGroups();
         };
+
+        /* 右键上下文菜单 —— 优先级最高（第一位） */
+        const origGetExtra = nodeType.prototype.getExtraMenuOptions;
+        nodeType.prototype.getExtraMenuOptions = function (canvas, options) {
+            if (origGetExtra) origGetExtra.apply(this, arguments);
+            options.unshift({
+                content: "🎮  忽略多组_孤海 设置",
+                callback: () => {
+                    if (this._guhaiShowSettings) {
+                        this._guhaiShowSettings(
+                            Math.round(innerWidth  / 2 - 130),
+                            Math.round(innerHeight / 2 - 200)
+                        );
+                    }
+                }
+            });
+        };
     },
 });
 
 
 function buildIgnoreGroupsUI(node) {
 
-    /* 状态 */
+    /* ═══════════════════ 状态 ═══════════════════ */
     let filter    = "";
     let mode      = "default";
     let active    = null;
@@ -49,27 +66,19 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* DOM 结构 */
-    const root = document.createElement("div");
-    Object.assign(root.style, {
-        display: "flex",
-        flexDirection: "column",
-        width: "100%",
-        padding: "4px 8px",
-        boxSizing: "border-box",
-    });
-
-    const listEl = document.createElement("div");
-    Object.assign(listEl.style, {
-        display: "flex",
-        flexDirection: "column",
-        width: "100%",
-        gap: "15px",
-    });
-    root.appendChild(listEl);
+    /* ═══════════════════ Canvas 布局常量 ═══════════════════ */
+    const HEADER_H  = 14;    /* 齿轮图标区域高度  */
+    const ROW_H     = 34;   /* 每行高度          */
+    const ROW_GAP   = 15;   /* 行间距            */
+    const PAD_X     = 16;   /* 水平内边距（左右各缩进量） */
+    const ROW_PAD_L = 26;   /* 行内左边距        */
+    const ROW_PAD_R = 16;   /* 行内右边距        */
+    const TOGGLE_W  = 67;   /* 开关轨道宽度      */
+    const TOGGLE_H  = 26;   /* 开关轨道高度      */
+    const KNOB_R    = 11;   /* 旋钮半径          */
 
 
-    /* 几何工具 */
+    /* ═══════════════════ 几何工具 ═══════════════════ */
     function gBounds(g) {
         if (g._bounding) return [...g._bounding];
         if (g.bounding)  return [...g.bounding];
@@ -94,7 +103,7 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* 组数据 */
+    /* ═══════════════════ 组数据 ═══════════════════ */
     function rawGroups() {
         const g = app.graph;
         if (!g || !g._groups) return [];
@@ -157,17 +166,79 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* 旁路 / 恢复 */
+    /* ═══════════════════ 旁路 / 恢复 ═══════════════════ */
     function bypassGroup(grp)  { collectNodes(grp).forEach(n => { n.mode = 4; }); }
     function restoreGroup(grp) { collectNodes(grp).forEach(n => { n.mode = 0; }); }
-
 
     function isNodeActive(n) {
         return n.mode !== 4 && n.mode !== 2 && !n.flags?.disabled;
     }
 
 
-    /* 核心刷新 */
+    /* ═══════════════════ Canvas 绘图辅助 ═══════════════════ */
+
+    function rrect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+    }
+
+    function ellipsis(ctx, text, maxW) {
+        if (ctx.measureText(text).width <= maxW) return text;
+        let t = text;
+        while (t.length > 1 && ctx.measureText(t + "…").width > maxW) {
+            t = t.slice(0, -1);
+        }
+        return t + "…";
+    }
+
+    /* 齿轮图标 */
+    function drawGear(ctx, cx, cy, r) {
+        const teeth  = 8;
+        const outerR = r;
+        const innerR = r * 0.65;
+        const holeR  = r * 0.3;
+        const step   = (Math.PI * 2) / teeth;
+        const q      = step * 0.25;
+
+        ctx.save();
+        ctx.beginPath();
+        for (let i = 0; i < teeth; i++) {
+            const a = i * step - Math.PI / 2;
+            if (i === 0) {
+                ctx.moveTo(cx + outerR * Math.cos(a - q), cy + outerR * Math.sin(a - q));
+            } else {
+                ctx.lineTo(cx + outerR * Math.cos(a - q), cy + outerR * Math.sin(a - q));
+            }
+            ctx.lineTo(cx + outerR * Math.cos(a + q), cy + outerR * Math.sin(a + q));
+            const va = a + step / 2;
+            ctx.lineTo(cx + innerR * Math.cos(va - q), cy + innerR * Math.sin(va - q));
+            ctx.lineTo(cx + innerR * Math.cos(va + q), cy + innerR * Math.sin(va + q));
+        }
+        ctx.closePath();
+        ctx.fillStyle = "rgba(120,120,120,0.15)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(120,120,120,0.4)";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        /* 中心孔 */
+        ctx.beginPath();
+        ctx.arc(cx, cy, holeR, 0, Math.PI * 2);
+        ctx.fillStyle = "#2a2a2a";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(153,153,153,0.6)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+    }
+
+
+    /* ═══════════════════ 核心刷新 ═══════════════════ */
     let lastSig = "";
 
     function refresh(forceApply) {
@@ -214,118 +285,10 @@ function buildIgnoreGroupsUI(node) {
             });
             try { app.graph.change(); } catch (_) { /* ignore */ }
         }
-
-        /* 重建 UI */
-        listEl.innerHTML = "";
-
-        if (!list.length) {
-            const msg = document.createElement("div");
-            Object.assign(msg.style, {
-                fontSize: "13px", color: "#888",
-                textAlign: "center", padding: "8px 0",
-            });
-            msg.textContent = filter.trim() ? "无匹配的组" : "工作流中无编组";
-            listEl.appendChild(msg);
-            return;
-        }
-
-        list.forEach(g => {
-            let isOn;
-            if (mode === "default") {
-                isOn = activeSet.includes(g.title);
-            } else {
-                isOn = (g.title === active);
-            }
-            listEl.appendChild(buildRow(g.title, isOn));
-        });
     }
 
 
-    /* 构建单个胶囊开关行 */
-    function buildRow(title, isOn) {
-        const row = document.createElement("div");
-        Object.assign(row.style, {
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            width: "100%",
-            boxSizing: "border-box",
-            border: "1px solid #6E7581",
-            borderRadius: "20px",
-            padding: "2px 16px 2px 26px",
-        });
-
-        const label = document.createElement("span");
-        label.textContent = title;
-        const effectiveColor = nameColor || "#e0e0e0";
-        Object.assign(label.style, {
-            fontSize: "20px",
-            fontWeight: "bold",
-            fontFamily: "inherit",
-            color: effectiveColor,
-            userSelect: "none",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            flex: "1",
-            marginRight: "8px",
-            lineHeight: "28px",
-        });
-        row.appendChild(label);
-
-        const track = document.createElement("div");
-        Object.assign(track.style, {
-            position: "relative",
-            width: "67px",
-            height: "26px",
-            borderRadius: "13px",
-            cursor: "pointer",
-            flexShrink: "0",
-            transition:
-                "background 0.3s cubic-bezier(.4,0,.2,1), box-shadow 0.3s ease",
-        });
-
-        const knob = document.createElement("div");
-        Object.assign(knob.style, {
-            position: "absolute",
-            top: "2px",
-            width: "22px",
-            height: "22px",
-            borderRadius: "50%",
-            background: "#999999",
-            transition:
-                "left 0.3s cubic-bezier(.4,0,.2,1), background 0.3s ease",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
-        });
-        track.appendChild(knob);
-        row.appendChild(track);
-
-        function paint(on) {
-            if (on) {
-                track.style.background = "#4CAF50";
-                track.style.boxShadow =
-                    "inset 0 1px 3px rgba(0,0,0,0.1), 0 0 10px rgba(76,175,80,0.35)";
-                knob.style.left      = "42px";
-                knob.style.background = "#ffffff";
-            } else {
-                track.style.background = "#606060";
-                track.style.boxShadow  = "inset 0 1px 3px rgba(0,0,0,0.2)";
-                knob.style.left        = "3px";
-                knob.style.background  = "#999999";
-            }
-        }
-        paint(isOn);
-
-        track.addEventListener("click", (e) => {
-            e.stopPropagation();
-            handleToggle(title);
-        });
-
-        return row;
-    }
-
-
-    /* 切换逻辑 */
+    /* ═══════════════════ 切换逻辑 ═══════════════════ */
     function handleToggle(title) {
         if (mode === "default") {
             if (!Array.isArray(activeSet)) activeSet = [];
@@ -365,7 +328,7 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* 右键设置弹窗 */
+    /* ═══════════════════ 设置弹窗 ═══════════════════ */
     function showSettings(x, y) {
         const old = document.getElementById("guhai_ig_pop");
         if (old) old.remove();
@@ -375,7 +338,7 @@ function buildIgnoreGroupsUI(node) {
         Object.assign(pop.style, {
             position: "fixed",
             left: Math.min(x, innerWidth  - 280) + "px",
-            top:  Math.min(y, innerHeight - 380) + "px",
+            top:  Math.min(y, innerHeight - 420) + "px",
             background: "#2a2a2a",
             border: "1px solid #555",
             borderRadius: "8px",
@@ -387,7 +350,17 @@ function buildIgnoreGroupsUI(node) {
             fontFamily: "inherit",
         });
 
-        /* 匹配标题 */
+        /* ── 标题 ── */
+        const titleEl = document.createElement("div");
+        titleEl.textContent = "🎮  忽略多组_孤海 设置";
+        Object.assign(titleEl.style, {
+            fontSize: "15px", fontWeight: "bold", marginBottom: "14px",
+            color: "#e0e0e0",
+            borderBottom: "1px solid #444", paddingBottom: "8px",
+        });
+        pop.appendChild(titleEl);
+
+        /* ── 匹配标题关键词 ── */
         const fLabel = document.createElement("div");
         fLabel.textContent = "匹配标题关键词";
         Object.assign(fLabel.style, {
@@ -407,7 +380,7 @@ function buildIgnoreGroupsUI(node) {
         });
         pop.appendChild(fInput);
 
-        /* 切换模式 */
+        /* ── 切换模式 ── */
         const mLabel = document.createElement("div");
         mLabel.textContent = "切换模式";
         Object.assign(mLabel.style, {
@@ -435,7 +408,7 @@ function buildIgnoreGroupsUI(node) {
         mSelect.value = mode;
         pop.appendChild(mSelect);
 
-        /* 组名颜色 */
+        /* ── 组名颜色 ── */
         const cLabel = document.createElement("div");
         cLabel.textContent = "组名颜色";
         Object.assign(cLabel.style, {
@@ -475,7 +448,7 @@ function buildIgnoreGroupsUI(node) {
         });
         pop.appendChild(colorRow);
 
-        /* 按钮 */
+        /* ── 按钮 ── */
         const btnRow = document.createElement("div");
         Object.assign(btnRow.style, {
             display: "flex", justifyContent: "flex-end", gap: "8px",
@@ -557,24 +530,159 @@ function buildIgnoreGroupsUI(node) {
         });
     }
 
-    root.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        showSettings(e.clientX, e.clientY);
+    /* 暴露设置函数供右键菜单调用 */
+    node._guhaiShowSettings = showSettings;
+
+
+    /* ═══════════════════ Canvas 自定义 Widget ═══════════════════ */
+    let _w = 400, _y = 0;
+
+    node.addCustomWidget({
+        name: "guhai_ig",
+        type: "ig_custom",
+
+        /* ── 每帧绘制 ── */
+        draw(ctx, node, widgetWidth, y, H) {
+            _w = widgetWidth;
+            _y = y;
+
+            /* ── 齿轮图标（半径 5，宽高各 10 像素） ── */
+            const gearCX = widgetWidth - 18;
+            const gearCY = y + HEADER_H / 2;
+            drawGear(ctx, gearCX, gearCY, 5);
+
+            /* ── 组列表 ── */
+            const list = visible();
+
+            if (!list.length) {
+                ctx.font = "13px sans-serif";
+                ctx.fillStyle = "#888";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(
+                    filter.trim() ? "无匹配的组" : "工作流中无编组",
+                    widgetWidth / 2,
+                    y + HEADER_H + 20
+                );
+                return;
+            }
+
+            const effectiveColor = nameColor || "#e0e0e0";
+
+            list.forEach((g, i) => {
+                const rowX = PAD_X;
+                const rowY = y + HEADER_H + i * (ROW_H + ROW_GAP);
+                const rowW = widgetWidth - PAD_X * 2;
+                const isOn = mode === "default"
+                    ? activeSet.includes(g.title)
+                    : g.title === active;
+
+                /* 胶囊背景填充 */
+                rrect(ctx, rowX, rowY, rowW, ROW_H, ROW_H / 2);
+                ctx.fillStyle = "#2B2F38";
+                ctx.fill();
+
+                /* 胶囊边框描边 */
+                rrect(ctx, rowX, rowY, rowW, ROW_H, ROW_H / 2);
+                ctx.strokeStyle = "#6E7581";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                /* 开关轨道 */
+                const tx = rowX + rowW - ROW_PAD_R - TOGGLE_W;
+                const ty = rowY + (ROW_H - TOGGLE_H) / 2;
+
+                ctx.save();
+                if (isOn) {
+                    ctx.shadowColor = "rgba(76,175,80,0.35)";
+                    ctx.shadowBlur = 10;
+                    ctx.fillStyle = "#4CAF50";
+                } else {
+                    ctx.shadowColor = "transparent";
+                    ctx.shadowBlur = 0;
+                    ctx.fillStyle = "#606060";
+                }
+                rrect(ctx, tx, ty, TOGGLE_W, TOGGLE_H, TOGGLE_H / 2);
+                ctx.fill();
+                ctx.restore();
+
+                /* 旋钮 */
+                const kx = isOn ? tx + TOGGLE_W - KNOB_R - 3 : tx + KNOB_R + 3;
+                const ky = ty + TOGGLE_H / 2;
+
+                ctx.save();
+                ctx.shadowColor = "rgba(0,0,0,0.3)";
+                ctx.shadowBlur = 4;
+                ctx.fillStyle = isOn ? "#ffffff" : "#999999";
+                ctx.beginPath();
+                ctx.arc(kx, ky, KNOB_R, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+
+                /* 标签文字 —— 开关关闭时标题不透明度变为 50% */
+                const textX = rowX + ROW_PAD_L;
+                const maxTextW = tx - textX - 10;
+                ctx.save();
+                ctx.globalAlpha = isOn ? 1.0 : 0.5;
+                ctx.font = "bold 20px sans-serif";
+                ctx.fillStyle = effectiveColor;
+                ctx.textAlign = "left";
+                ctx.textBaseline = "middle";
+                ctx.fillText(
+                    ellipsis(ctx, g.title, maxTextW),
+                    textX,
+                    rowY + ROW_H / 2
+                );
+                ctx.restore();
+            });
+        },
+
+        /* ── 鼠标事件 ── */
+        mouse(event, pos, node) {
+            if (event.type !== "pointerdown" && event.type !== "mousedown") {
+                return false;
+            }
+
+            /* pos 为节点局部坐标，转为 widget 内部坐标 */
+            const localX = pos[0];
+            const localY = pos[1] - _y;
+
+            /* ── 齿轮图标点击（检测半径 7，略大于绘制半径方便点击） ── */
+            const gearCX = _w - 18;
+            const gearCY = HEADER_H / 2;
+            const gdx = localX - gearCX;
+            const gdy = localY - gearCY;
+            if (gdx * gdx + gdy * gdy < 7 * 7) {
+                showSettings(event.clientX, event.clientY);
+                return true;
+            }
+
+            /* ── 开关点击 ── */
+            const list = visible();
+            for (let i = 0; i < list.length; i++) {
+                const rowY = HEADER_H + i * (ROW_H + ROW_GAP);
+                const rowW = _w - PAD_X * 2;
+                const tx = PAD_X + rowW - ROW_PAD_R - TOGGLE_W;
+                const ty = rowY + (ROW_H - TOGGLE_H) / 2;
+
+                if (localX >= tx && localX <= tx + TOGGLE_W &&
+                    localY >= ty && localY <= ty + TOGGLE_H) {
+                    handleToggle(list[i].title);
+                    return true;
+                }
+            }
+
+            return false;
+        },
+
+        computeSize(width) {
+            const cnt = Math.max(visible().length, 1);
+            return [400, HEADER_H + cnt * (ROW_H + ROW_GAP) - ROW_GAP + 10];
+        },
     });
 
 
-    /* 注册 DOM Widget */
-    const widget = node.addDOMWidget("guhai_ig", "guhai_ig", root, {
-        serialize: false,
-    });
-
-    widget.computeSize = function () {
-        const cnt = Math.max(visible().length, 1);
-        return [400, cnt * 49 + 10];
-    };
-
-
+    /* ═══════════════════ 定时同步 ═══════════════════ */
     let pageVisible = !document.hidden;
     function onVisibilityChange() {
         const nowVisible = !document.hidden;
@@ -586,8 +694,6 @@ function buildIgnoreGroupsUI(node) {
         }
     }
     document.addEventListener("visibilitychange", onVisibilityChange);
-
-
 
     const timer = setInterval(() => {
         if (!node.graph) {
@@ -610,19 +716,13 @@ function buildIgnoreGroupsUI(node) {
                     return;
                 }
 
-                // ★ 非对称判断逻辑：
-                //   - OFF → ON：组内所有节点都活跃时才开启（every）
-                //   - ON → OFF：组内所有节点都不活跃时才关闭（!some）
-                //   只要还有至少一个节点活跃，组开关就保持不变
                 const wasOn = activeSet.includes(g.title);
                 if (wasOn) {
-                    // 组当前是开启的：只有全部节点都不活跃才关闭
                     const anyActive = nodes.some(n => isNodeActive(n));
                     if (anyActive) {
                         newSet.push(g.title);
                     }
                 } else {
-                    // 组当前是关闭的：只有全部节点都活跃才开启
                     const allActive = nodes.every(n => isNodeActive(n));
                     if (allActive) {
                         newSet.push(g.title);
@@ -639,7 +739,6 @@ function buildIgnoreGroupsUI(node) {
         } else if (mode === "always_one" || mode === "at_most_one") {
             let foundActive = null;
 
-            // 优先检查当前活跃组：只要还有至少一个节点活跃就保持不变
             if (active) {
                 const currentGrp = list.find(g => g.title === active);
                 if (currentGrp) {
@@ -650,7 +749,6 @@ function buildIgnoreGroupsUI(node) {
                 }
             }
 
-            // 如果当前活跃组已全部关闭（或无活跃组），寻找全部节点都活跃的组
             if (!foundActive) {
                 for (const g of list) {
                     const nodes = collectNodes(g);
@@ -684,7 +782,7 @@ function buildIgnoreGroupsUI(node) {
     }, 3000);
 
 
-    /* 工作流加载后同步 */
+    /* ═══════════════════ 工作流加载后同步 ═══════════════════ */
     node._guhaiSyncGroups = () => {
         filter    = (node.properties && node.properties.guhai_ig_filter)     || "";
         mode      = (node.properties && node.properties.guhai_ig_mode)       || "default";
@@ -696,6 +794,6 @@ function buildIgnoreGroupsUI(node) {
     };
 
 
-    /* 初始构建 */
+    /* ═══════════════════ 初始构建 ═══════════════════ */
     refresh(false);
 }

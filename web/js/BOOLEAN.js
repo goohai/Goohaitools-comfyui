@@ -2,7 +2,6 @@ import { app } from "../../../scripts/app.js";
 
 /* ═══════════════════════════════════════════════════════════
  *  布尔开关  —  替换 "布尔 孤海" 节点原生 checkbox
- *  仿手机 APP 胶囊开关，左侧可双击编辑名称
  * ═══════════════════════════════════════════════════════════ */
 
 app.registerExtension({
@@ -14,6 +13,10 @@ app.registerExtension({
         const origOnCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origOnCreated?.apply(this, arguments);
+
+            /* ── 设置默认节点颜色（仅首次创建时） ── */
+            this.color = "#4F4047";
+            this.bgcolor = "#493C42";  
             buildCustomSwitch(this);
         };
 
@@ -27,7 +30,7 @@ app.registerExtension({
 
 
 /* ────────────────────────────────────────────────────────────
- *  构建自定义开关 DOM
+ *  构建自定义开关（Canvas 绘制，非 DOM）
  * ──────────────────────────────────────────────────────────── */
 function buildCustomSwitch(node) {
     const boolWidget = node.widgets?.find((w) => w.name === "开关");
@@ -36,198 +39,192 @@ function buildCustomSwitch(node) {
     boolWidget.hidden = true;
 
     let isOn = !!boolWidget.value;
-
-    // 从 node.properties 恢复持久化的标签文本（刷新后不丢失）
     let labelText = (node.properties && node.properties.guhai_label) || "开关";
-    let activeInput = null; // 追踪当前编辑中的 input 实例
+    let lastClickTime = 0;
+    let activeInput = null;
+    let _w = 200, _y = 0, _h = 44;
 
-    /* ── 根容器 ── */
-    const root = document.createElement("div");
-    Object.assign(root.style, {
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        width: "100%",
-        padding: "4px 8px",
-        boxSizing: "border-box",
-    });
-
-    /* ════════════════════════════════════════════════════════
-     *  左侧 — 可编辑标签
-     * ════════════════════════════════════════════════════════ */
-    const label = document.createElement("span");
-    label.textContent = labelText;
-    Object.assign(label.style, {
-        fontSize: "20px",
-        fontWeight: "bold",
-        fontFamily: "inherit",
-        color: "#e0e0e0",
-        cursor: "default",
-        userSelect: "none",
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        flex: "1",
-        marginRight: "10px",
-        lineHeight: "28px",
-    });
-    root.appendChild(label);
-
-    /* ════════════════════════════════════════════════════════
-     *  右侧 — 椭圆拨动开关
-     * ════════════════════════════════════════════════════════ */
-    const track = document.createElement("div");
-    Object.assign(track.style, {
-        position: "relative",
-        width: "72px",
-        height: "28px",
-        borderRadius: "14px",
-        cursor: "pointer",
-        transition:
-            "background 0.3s cubic-bezier(.4,0,.2,1), box-shadow 0.3s ease",
-        flexShrink: "0",
-    });
-
-    const knob = document.createElement("div");
-    Object.assign(knob.style, {
-        position: "absolute",
-        top: "3px",
-        width: "22px",
-        height: "22px",
-        borderRadius: "50%",
-        background: "#999999",
-        transition: "left 0.3s cubic-bezier(.4,0,.2,1), background 0.3s ease",
-        boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
-    });
-    track.appendChild(knob);
-    root.appendChild(track);
-
-    /* ════════════════════════════════════════════════════════
-     *  全局键盘监听（仅编辑期间生效）
-     *  注册在 document 的 capturing 阶段，确保在 ComfyUI
-     *  等框架拦截键盘事件之前就能捕获 Enter / Escape
-     * ════════════════════════════════════════════════════════ */
-    function onGlobalKeyDown(ev) {
-        if (!activeInput) return;          // 非编辑状态，不拦截
-        if (ev.key === "Enter" || ev.key === "Escape") {
-            ev.stopImmediatePropagation();
-            ev.preventDefault();
-            finishEdit();
-        }
+    /* ── 圆角矩形辅助 ── */
+    function rrect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
     }
 
-    /* ── 结束编辑（统一出口） ── */
+    /* ── 文本截断辅助 ── */
+    function ellipsis(ctx, text, maxW) {
+        if (ctx.measureText(text).width <= maxW) return text;
+        let t = text;
+        while (t.length > 1 && ctx.measureText(t + "…").width > maxW) {
+            t = t.slice(0, -1);
+        }
+        return t + "…";
+    }
+
+    /* ── 结束标签编辑 ── */
     function finishEdit() {
-        if (!activeInput) return;          // 防止重复调用
-
-        // 1. 保存文本
+        if (!activeInput) return;
         labelText = activeInput.value.trim() || "开关";
-        label.textContent = labelText;
-
-        // 2. 持久化到节点属性（工作流保存/刷新后可恢复）
+        activeInput.remove();
+        activeInput = null;
         try {
             node.properties = node.properties || {};
             node.properties.guhai_label = labelText;
-        } catch (_) { /* 忽略 */ }
-
-        // 3. 移除 input、恢复 label
-        activeInput.remove();
-        activeInput = null;
-        label.style.display = "";
-
-        // 4. 解绑全局键盘监听
-        document.removeEventListener("keydown", onGlobalKeyDown, true);
+        } catch (_) {}
     }
 
-    /* ── 双击编辑标签 ── */
-    label.addEventListener("dblclick", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (activeInput) return;           // 已在编辑中，忽略
+    /* ── 开始标签编辑 ── */
+    function startLabelEdit(clientX, clientY) {
+        if (activeInput) return;
 
+        const scale = app.canvas?.ds?.scale ?? 1;
         const input = document.createElement("input");
         input.type = "text";
         input.value = labelText;
         Object.assign(input.style, {
-            fontSize: "20px",
+            position: "fixed",
+            left: clientX + "px",
+            top: (clientY - 14 * scale) + "px",
+            fontSize: Math.max(12, Math.round(20 * scale)) + "px",
             fontWeight: "bold",
-            fontFamily: "inherit",
             color: "#e0e0e0",
             background: "#2a2a2a",
             border: "1px solid #555",
             borderRadius: "4px",
-            padding: "1px 6px",
+            padding: "2px 6px",
             outline: "none",
-            width: "138px",
-            boxSizing: "border-box",
-            lineHeight: "28px",
+            zIndex: "99999",
+            minWidth: "80px",
         });
 
+        document.body.appendChild(input);
         activeInput = input;
-        label.style.display = "none";
-        root.insertBefore(input, track);
 
-        // 等 DOM 更新完毕后再聚焦，避免与 mousedown 事件冲突
         requestAnimationFrame(() => {
             input.focus();
             input.select();
         });
 
-        // 注册全局键盘监听（capturing 阶段）
-        document.addEventListener("keydown", onGlobalKeyDown, true);
+        input.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === "Escape") {
+                ev.preventDefault();
+                ev.stopImmediatePropagation();
+                finishEdit();
+            }
+        }, true);
 
-        // 失焦 = 点击了其他地方 → 自动确认
         input.addEventListener("blur", () => {
-            // 延迟 50ms：让 click 等事件先处理完毕，避免竞态
             setTimeout(finishEdit, 50);
         });
-    });
-
-    /* ── 同步视觉状态 ── */
-    function updateUI() {
-        if (isOn) {
-            track.style.background = "#4CAF50";
-            track.style.boxShadow =
-                "inset 0 1px 3px rgba(0,0,0,0.1), 0 0 10px rgba(76,175,80,0.35)";
-            knob.style.left = "47px";
-            knob.style.background = "#ffffff";
-        } else {
-            track.style.background = "#606060";
-            track.style.boxShadow = "inset 0 1px 3px rgba(0,0,0,0.2)";
-            knob.style.left = "3px";
-            knob.style.background = "#999999";
-        }
     }
-    updateUI();
-
-    /* ── 点击切换开关 ── */
-    track.addEventListener("click", (e) => {
-        e.stopPropagation();
-        finishEdit();                      // 先结束可能存在的编辑
-        isOn = !isOn;
-        boolWidget.value = isOn;
-        updateUI();
-    });
 
     /* ════════════════════════════════════════════════════════
-     *  注册 DOM Widget & 同步钩子
-     *  锁定 widget 高度，防止节点拉高时开关跟随下移
+     *  注册 Canvas 自定义 Widget
      * ════════════════════════════════════════════════════════ */
-    const toggleWidget = node.addDOMWidget("guhai_toggle", "guhai_toggle", root, {
-        serialize: false,
+    node.addCustomWidget({
+        name: "guhai_toggle",
+        type: "toggle_custom",
+        value: isOn,
+
+        /* ── 每帧绘制 ── */
+        draw(ctx, node, widgetWidth, y, H) {
+            _w = widgetWidth;
+            _y = y;
+            _h = H;
+
+            const m = 10;
+            const yOff = 6;
+            const xOff = 6;
+
+            /* ─ 开关轨道 ─ */
+            const tw = 72, th = 28;
+            const tx = widgetWidth - tw - m - xOff;
+            const ty = y + yOff + (H - th) / 2;
+
+            /* ─ 标签文字：在按钮左侧区域内水平居中 ─ */
+            const textAreaRight = tx - m;
+            const textAreaCenter = (m + textAreaRight) / 2;
+            const maxTextW = textAreaRight - m;
+
+            ctx.font = "bold 20px sans-serif";
+            ctx.fillStyle = "#e0e0e0";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(
+                ellipsis(ctx, labelText, maxTextW),
+                textAreaCenter,
+                y + yOff + H / 2
+            );
+
+            /* ─ 开关轨道绘制 ─ */
+            ctx.save();
+            if (isOn) {
+                ctx.shadowColor = "rgba(76,175,80,0.4)";
+                ctx.shadowBlur = 10;
+                ctx.fillStyle = "#4CAF50";
+            } else {
+                ctx.fillStyle = "#606060";
+            }
+            rrect(ctx, tx, ty, tw, th, th / 2);
+            ctx.fill();
+            ctx.restore();
+
+            /* ─ 圆形旋钮 ─ */
+            const kr = 11;
+            const kx = isOn ? tx + tw - kr - 3 : tx + kr + 3;
+            const ky = ty + th / 2;
+
+            ctx.save();
+            ctx.shadowColor = "rgba(0,0,0,0.3)";
+            ctx.shadowBlur = 4;
+            ctx.fillStyle = isOn ? "#ffffff" : "#999999";
+            ctx.beginPath();
+            ctx.arc(kx, ky, kr, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        },
+
+        /* ── 鼠标事件 ── */
+        mouse(event, pos, node) {
+            if (event.type !== "pointerdown" && event.type !== "mousedown") {
+                return false;
+            }
+
+            const now = Date.now();
+            const dbl = (now - lastClickTime) < 350;
+            lastClickTime = now;
+
+            /* 双击 → 编辑标签 */
+            if (dbl) {
+                startLabelEdit(event.clientX, event.clientY);
+                return true;
+            }
+
+            /* 单击 → 切换开关 */
+            const toggleStartX = _w - 72 - 10 - 20;
+            if (pos[0] > toggleStartX) {
+                isOn = !isOn;
+                boolWidget.value = isOn;
+                this.value = isOn;
+                return true;
+            }
+
+            return false;
+        },
+
+        computeSize(width) {
+            return [width, 44];
+        },
     });
 
-    // 节点拉高时，多余空间分配给底部空白，开关位置不变
-    toggleWidget.computeSize = function () {
-        return [this.width || 200, 36];
-    };
-
-    // 工作流加载后同步 UI（含标签文本恢复）
+    /* ── 工作流加载后同步 UI ── */
     node._guhaiSyncUI = () => {
         isOn = !!boolWidget.value;
         labelText = (node.properties && node.properties.guhai_label) || "开关";
-        label.textContent = labelText;
-        if (activeInput) finishEdit();     // 加载新工作流时清理残留编辑
-        updateUI();
+        if (activeInput) finishEdit();
     };
 }

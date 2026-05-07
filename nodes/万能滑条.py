@@ -18,7 +18,7 @@ class GoohaiUniversalSlider:
         return {
             "required": {
                 "值": ("FLOAT", {
-                    "default": 1,
+                    "default": 0.75,
                     "min": -999999,
                     "max": 999999,
                     "step": 0.01,

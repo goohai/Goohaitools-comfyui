@@ -14,7 +14,7 @@ const GALLERY_WIDTH = COLS * THUMB_W + (COLS - 1) * GAP + SCROLLBAR_EXTRA;
 const BORDER_HIGHLIGHT = 3;
 const SEARCH_AREA_H = 34;
 const INNER_GAP = 6;
-const PROMPT_TEXTAREA_H = THUMB_H - INNER_GAP - SEARCH_AREA_H; // 180 - 6 - 34 = 140
+const PROMPT_TEXTAREA_H = THUMB_H - INNER_GAP - SEARCH_AREA_H;
 const TOP_ROW_GAP = 15;
 const BOTTOM_PAD = 20;
 
@@ -31,6 +31,8 @@ async function loadTemplateData() {
     }
     return _dataCache;
 }
+
+// ==================== UI 辅助元素 ====================
 
 function createCheckmark() {
     const el = document.createElement("div");
@@ -64,6 +66,18 @@ function createSelectedBadge() {
     return el;
 }
 
+function createImageFallback(parent, title, width, height, borderRadius) {
+    const fb = document.createElement("div");
+    Object.assign(fb.style, {
+        width, height,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: "#333", color: "#999", fontSize: "11px",
+        padding: "4px", textAlign: "center", borderRadius,
+    });
+    fb.textContent = title;
+    parent.appendChild(fb);
+}
+
 // ==================== 注册扩展 ====================
 
 app.registerExtension({
@@ -87,7 +101,7 @@ app.registerExtension({
             const allTemplates = data.templates;
             const allCategories = data.categories;
 
-            // ========== 状态 ==========
+            // ========== 状态变量 ==========
             const defaultCat = allCategories[0] || "";
             let currentCategory = defaultCat;
             let searchQuery = "";
@@ -95,9 +109,14 @@ app.registerExtension({
             let selectedCategory = "";
             let selectedFilename = "";
             let selectedPrompt = "";
+            let _lastSyncedValue = "";
+            let _lastAppliedMaxH = 0;
 
             // ========== 提示词输出 widget ==========
             const promptWidget = node.widgets?.find(w => w.name === "提示词输出");
+            if (promptWidget) {
+                _lastSyncedValue = promptWidget.value || "";
+            }
 
             // ========== 挂接「风格类型」下拉回调 ==========
             const catWidget = node.widgets?.find(w => w.name === "风格类型");
@@ -133,11 +152,31 @@ app.registerExtension({
                 return (allTemplates[cat] || []).find(t => t.filename === fname);
             }
 
+            function saveSelectionState() {
+                if (!node.properties) node.properties = {};
+                const actualPrompt = promptWidget ? (promptWidget.value || "") : selectedPrompt;
+                if (selectedFilename && selectedCategory) {
+                    node.properties._goohai_sel = {
+                        cat: selectedCategory,
+                        file: selectedFilename,
+                        curCat: currentCategory,
+                        prompt: actualPrompt,
+                    };
+                } else {
+                    node.properties._goohai_sel = {
+                        _none: true,
+                        curCat: currentCategory,
+                        prompt: actualPrompt,
+                    };
+                }
+            }
+
             function deselectAll() {
                 selectedCategory = "";
                 selectedFilename = "";
                 selectedPrompt = "";
                 syncPrompt();
+                saveSelectionState();
                 renderGallery();
             }
 
@@ -146,17 +185,16 @@ app.registerExtension({
                 selectedFilename = tpl.filename;
                 selectedPrompt = tpl.prompt || "";
                 syncPrompt();
+                saveSelectionState();
                 renderGallery();
             }
 
             function buildDisplayList() {
                 let pool = [];
                 if (isSearching) {
-                    // 用任意符号类字符作为分隔符（中文逗号、英文逗号、空格、分号、顿号等），
-                    // 将搜索词拆分为多个关键词
                     const keywords = searchQuery
                         .toLowerCase()
-                        .split(/[,，、\s;；\-_.!@#$%^&*()+=$${}|\\:";'<>?\/~`]+/)
+                        .split(/[,，、\s;；\-_.!@#$%^&*()+=${}|\\:"'<>?\/~`]+/)
                         .filter(k => k.length > 0);
 
                     for (const cat of allCategories) {
@@ -164,8 +202,6 @@ app.registerExtension({
                             const catLower = cat.toLowerCase();
                             const titleLower = tpl.title.toLowerCase();
                             const promptLower = tpl.prompt.toLowerCase();
-                            // 所有关键词都必须匹配（AND 逻辑），
-                            // 每个关键词只要出现在文件夹名、标题或提示词中的任意一个即可
                             const allMatch = keywords.every(kw =>
                                 catLower.includes(kw)
                                 || titleLower.includes(kw)
@@ -181,27 +217,17 @@ app.registerExtension({
                 }
 
                 const list = [];
-                const hasSelection = selectedFilename && selectedCategory;
+                const sel = selectedFilename && selectedCategory
+                    ? findTemplate(selectedCategory, selectedFilename)
+                    : null;
 
-                if (!hasSelection) {
-                    list.push({
-                        _kind: "none", title: "无", prompt: "",
-                        _isSel: false, _isFirst: true,
-                    });
-                } else {
-                    const sel = findTemplate(selectedCategory, selectedFilename);
-                    if (sel) {
-                        list.push({ _kind: "first_preview", ...sel, _isSel: false, _isFirst: true });
-                    } else {
-                        list.push({
-                            _kind: "none", title: "无", prompt: "",
-                            _isSel: false, _isFirst: true,
-                        });
-                    }
-                }
+                list.push(sel
+                    ? { _kind: "first_preview", ...sel, _isSel: false, _isFirst: true }
+                    : { _kind: "none", title: "无", prompt: "", _isSel: false, _isFirst: true }
+                );
 
                 for (const tpl of pool) {
-                    const isSelected = hasSelection
+                    const isSelected = !!sel
                         && tpl.category === selectedCategory
                         && tpl.filename === selectedFilename;
                     list.push({ _kind: "item", ...tpl, _isSel: isSelected, _isFirst: false });
@@ -311,6 +337,7 @@ app.registerExtension({
                     }
                 }
                 _lastSyncedValue = promptArea.value;
+                saveSelectionState();
             });
             rightCol.appendChild(promptArea);
 
@@ -428,6 +455,7 @@ app.registerExtension({
 
             function renderPreviewBox(firstItem) {
                 previewBox.innerHTML = "";
+                const innerRadius = `${BORDER_RADIUS - BORDER_HIGHLIGHT}px`;
 
                 if (firstItem._kind === "none") {
                     const placeholder = document.createElement("div");
@@ -435,7 +463,7 @@ app.registerExtension({
                         width: "100%", height: "100%",
                         display: "flex", alignItems: "center", justifyContent: "center",
                         background: "#2d2d2d", color: "#888", fontSize: "16px",
-                        borderRadius: `${BORDER_RADIUS - BORDER_HIGHLIGHT}px`,
+                        borderRadius: innerRadius,
                     });
                     placeholder.textContent = "无";
                     previewBox.appendChild(placeholder);
@@ -446,20 +474,11 @@ app.registerExtension({
                     Object.assign(img.style, {
                         width: "100%", height: "100%",
                         objectFit: "cover", display: "block",
-                        borderRadius: `${BORDER_RADIUS - BORDER_HIGHLIGHT}px`,
+                        borderRadius: innerRadius,
                     });
                     img.onerror = function () {
                         this.style.display = "none";
-                        const fb = document.createElement("div");
-                        Object.assign(fb.style, {
-                            width: "100%", height: "100%",
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                            background: "#333", color: "#999", fontSize: "11px",
-                            padding: "4px", textAlign: "center",
-                            borderRadius: `${BORDER_RADIUS - BORDER_HIGHLIGHT}px`,
-                        });
-                        fb.textContent = firstItem.title;
-                        previewBox.appendChild(fb);
+                        createImageFallback(previewBox, firstItem.title, "100%", "100%", innerRadius);
                     };
                     previewBox.appendChild(img);
                     previewBox.appendChild(createSelectedBadge());
@@ -474,15 +493,16 @@ app.registerExtension({
                 gallery.innerHTML = "";
                 const { items, poolCount } = buildDisplayList();
 
-                // 更新左侧预览框（第一位置项）
                 renderPreviewBox(items[0]);
 
-                // 画廊从第二项开始渲染（跳过第一项）
                 for (let i = 1; i < items.length; i++) {
                     const item = items[i];
-                    const card = document.createElement("div");
                     const showBorder = item._isSel;
+                    const cardRadius = showBorder
+                        ? `${BORDER_RADIUS - BORDER_HIGHLIGHT}px`
+                        : `${BORDER_RADIUS}px`;
 
+                    const card = document.createElement("div");
                     Object.assign(card.style, {
                         position: "relative", cursor: "pointer",
                         width: `${THUMB_W}px`,
@@ -510,26 +530,12 @@ app.registerExtension({
                         height: `${THUMB_H}px`,
                         objectFit: "cover",
                         display: "block",
-                        borderRadius: showBorder
-                            ? `${BORDER_RADIUS - BORDER_HIGHLIGHT}px`
-                            : `${BORDER_RADIUS}px`,
+                        borderRadius: cardRadius,
                     });
                     img.loading = "lazy";
                     img.onerror = function () {
                         this.style.display = "none";
-                        const fb = document.createElement("div");
-                        Object.assign(fb.style, {
-                            width: `${THUMB_W}px`,
-                            height: `${THUMB_H}px`,
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                            background: "#333", color: "#999", fontSize: "11px",
-                            padding: "4px", textAlign: "center",
-                            borderRadius: showBorder
-                                ? `${BORDER_RADIUS - BORDER_HIGHLIGHT}px`
-                                : `${BORDER_RADIUS}px`,
-                        });
-                        fb.textContent = item.title;
-                        card.appendChild(fb);
+                        createImageFallback(card, item.title, `${THUMB_W}px`, `${THUMB_H}px`, cardRadius);
                     };
                     card.appendChild(img);
 
@@ -568,8 +574,6 @@ app.registerExtension({
                     gallery.appendChild(card);
                 }
 
-                // 搜索模式下，排除第一项后检查实际可显示的搜索结果数
-                const galleryPoolCount = isSearching ? (poolCount > 0 ? poolCount : 0) : (poolCount > 0 ? poolCount - 0 : 0);
                 if (isSearching && poolCount === 0) {
                     const noResult = document.createElement("div");
                     Object.assign(noResult.style, {
@@ -604,13 +608,9 @@ app.registerExtension({
                 return { TITLE_H, SLOT_H };
             }
 
-            // 容器内部除画廊以外的所有固定高度开销
             function getContainerFixedOverhead() {
-                // container padding(8) + topRow(THUMB_H) + topRow marginBottom(6)
                 return 8 + THUMB_H + 6;
             }
-
-            let _lastAppliedMaxH = 0;
 
             function updateGalleryHeight() {
                 const { TITLE_H, SLOT_H } = getLayoutMetrics();
@@ -628,14 +628,12 @@ app.registerExtension({
                 gallery.style.maxHeight = maxH + "px";
             }
 
-            // ---- onResize 钩子 ----
             const origOnResize = node.onResize;
             node.onResize = function (size) {
                 if (origOnResize) origOnResize.call(node, size);
                 requestAnimationFrame(updateGalleryHeight);
             };
 
-            // ---- 轮询兜底 ----
             const _pollId = setInterval(() => {
                 if (!node.graph) { clearInterval(_pollId); return; }
                 updateGalleryHeight();
@@ -643,21 +641,31 @@ app.registerExtension({
 
             // ==================== 同步外部值变化 ====================
 
-            let _lastSyncedValue = promptWidget?.value || "";
             const _syncPollId = setInterval(() => {
                 if (!node.graph) { clearInterval(_syncPollId); return; }
                 const current = promptWidget?.value || "";
                 if (current !== _lastSyncedValue) {
                     _lastSyncedValue = current;
                     promptArea.value = current;
+                    selectedPrompt = current;
+                    saveSelectionState();
                 }
             }, 300);
 
-            // ==================== 恢复已保存状态 ====================
+            // ==================== 节点移除时清理定时器 ====================
 
-            function restoreState() {
+            const origOnRemoved = node.onRemoved;
+            node.onRemoved = function () {
+                clearInterval(_pollId);
+                clearInterval(_syncPollId);
+                origOnRemoved?.apply(this, arguments);
+            };
+
+            // ==================== 状态恢复 ====================
+
+            function tryLegacyRestore() {
                 const saved = promptWidget?.value || "";
-                if (!saved) return;
+                if (!saved) return false;
 
                 for (const cat of allCategories) {
                     const tpl = (allTemplates[cat] || []).find(t => t.prompt === saved);
@@ -669,26 +677,62 @@ app.registerExtension({
                         if (catWidget) catWidget.value = cat;
                         promptArea.value = selectedPrompt;
                         _lastSyncedValue = selectedPrompt;
+                        saveSelectionState();
                         renderGallery();
-                        return;
+                        return true;
                     }
                 }
+                return false;
             }
 
-            // ==================== 初始化 ====================
+            function restoreState() {
+                const state = node.properties?._goohai_sel;
+                if (!state) return tryLegacyRestore();
 
-            restoreState();
+                // 恢复当前浏览分类
+                if (state.curCat && allCategories.includes(state.curCat)) {
+                    currentCategory = state.curCat;
+                    if (catWidget) catWidget.value = currentCategory;
+                }
 
-            if (!promptWidget?.value) {
+                // 无选择状态
+                if (state._none) {
+                    selectedCategory = "";
+                    selectedFilename = "";
+                    selectedPrompt = state.prompt ?? "";
+                    syncPrompt();
+                    renderGallery();
+                    return true;
+                }
+
+                // 恢复模板选择
+                if (state.cat && state.file) {
+                    const tpl = findTemplate(state.cat, state.file);
+                    if (tpl) {
+                        selectedCategory = tpl.category;
+                        selectedFilename = tpl.filename;
+                        selectedPrompt = state.prompt ?? (tpl.prompt || "");
+                        syncPrompt();
+                        renderGallery();
+                        return true;
+                    }
+                }
+
+                return tryLegacyRestore();
+            }
+
+            // ==================== 初始渲染 ====================
+
+            if (!restoreState()) {
                 const defaultList = allTemplates[defaultCat] || [];
                 if (defaultList.length > 0) {
                     selectedCategory = defaultCat;
-                    //默认选择第5张
-                    selectedFilename = defaultList[4].filename;
-                    //默认选择第5张
-                    selectedPrompt = defaultList[4].prompt;
+                    const idx = Math.min(4, defaultList.length - 1);
+                    selectedFilename = defaultList[idx].filename;
+                    selectedPrompt = defaultList[idx].prompt;
                 }
                 syncPrompt();
+                saveSelectionState();
             }
 
             renderGallery();
