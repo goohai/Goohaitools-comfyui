@@ -5,7 +5,7 @@ class BoolGuHai:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "开关": ("BOOLEAN", {"default": False}),
+                "开关": ("BOOLEAN", {"default": True}),
             }
         }
 

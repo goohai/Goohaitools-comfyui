@@ -150,7 +150,7 @@ function buildCustomSwitch(node) {
             const textAreaCenter = (m + textAreaRight) / 2;
             const maxTextW = textAreaRight - m;
 
-            ctx.font = "bold 20px sans-serif";
+            ctx.font = "bold 24px sans-serif";
             ctx.fillStyle = "#e0e0e0";
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
