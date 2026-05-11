@@ -26,28 +26,32 @@ const isChinese = (ch) => /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/.test(ch);
 const isBreakPoint = (ch) => /[\s\p{P}\p{S}]/u.test(ch);
 const isPunct = (ch) => /\p{P}|\p{S}/.test(ch);
 
-// CJK/全角标点集合（用于换行决策，将全角标点视为中文语境字符）
 const CJK_PUNCT = new Set(
     '，。、！？：；「」『』【】《》（）\u201C\u201D\u2018\u2019—…～．'.split('')
 );
 const isCJKPunct = (ch) => CJK_PUNCT.has(ch);
 const isCJKLike = (ch) => isChinese(ch) || isCJKPunct(ch);
 
-// 行首禁则字符集合（逗号、句号、分号、感叹号、右引号）
 const LINE_START_FORBIDDEN = new Set([
-    ',', '，',           // 逗号
-    '.', '。',           // 句号
-    ';', '；',           // 分号
-    '!', '！',           // 感叹号
-    '\u201D', '\u2019',  // " ' 右双/单引号
-    '」', '』',          // 右角引号
+    ',', '，',
+    '.', '。',
+    ';', '；',
+    '!', '！',
+    '\u201D', '\u2019',
+    '」', '』',
 ]);
 const isLineStartForbidden = (ch) => LINE_START_FORBIDDEN.has(ch);
 
-// ==================== ComfyUI 字体获取工具 ====================
+// ==================== ComfyUI 字体获取工具（TTL 缓存） ====================
 let _cachedComfyFont = null;
+let _cachedFontTime = 0;
+const FONT_CACHE_TTL = 3000; 
+
 function getComfyUIFont() {
-    if (_cachedComfyFont) return _cachedComfyFont;
+    const now = Date.now();
+    if (_cachedComfyFont && (now - _cachedFontTime) < FONT_CACHE_TTL) {
+        return _cachedComfyFont;
+    }
 
     // ---- 策略1：从 CSS 自定义变量中读取 ----
     const rootStyle = getComputedStyle(document.documentElement);
@@ -59,6 +63,7 @@ function getComfyUIFont() {
         const val = rootStyle.getPropertyValue(varName).trim();
         if (val && val !== '' && val !== 'inherit' && val !== 'initial') {
             _cachedComfyFont = val;
+            _cachedFontTime = Date.now();
             return _cachedComfyFont;
         }
     }
@@ -84,6 +89,7 @@ function getComfyUIFont() {
             if (ff && ff.trim() !== '' && !ff.includes('serif')) {
                 if (!/^["']?serif/i.test(ff.trim()) && ff.trim().toLowerCase() !== 'serif') {
                     _cachedComfyFont = ff;
+                    _cachedFontTime = Date.now();
                     return _cachedComfyFont;
                 }
             }
@@ -100,16 +106,18 @@ function getComfyUIFont() {
             const lower = ff.trim().toLowerCase();
             if (lower !== 'serif' && !lower.startsWith('serif,')) {
                 _cachedComfyFont = ff;
+                _cachedFontTime = Date.now();
                 return _cachedComfyFont;
             }
         }
     }
 
-    // ---- 策略4：硬编码 ComfyUI 前端默认字体栈（最终兜底） ----
+    // ---- 策略4：硬编码 ComfyUI 前端默认字体栈（含等线 DengXian） ----
     _cachedComfyFont = [
         '-apple-system',
         'BlinkMacSystemFont',
         '"Segoe UI"',
+        'DengXian',
         'Roboto',
         '"Helvetica Neue"',
         '"Noto Sans"',
@@ -118,6 +126,7 @@ function getComfyUIFont() {
         'sans-serif'
     ].join(', ');
 
+    _cachedFontTime = Date.now();
     return _cachedComfyFont;
 }
 
@@ -171,7 +180,7 @@ class TextEditorNode extends TextEditorBaseNode {
             fontSize: 24,
             fontColor: "#E3E3E3",
             backgroundColor: "#1B4669",
-            backgroundAlpha: 0.8,
+            backgroundAlpha: 0.6,
             borderRadius: 30,
             padding: 12,
             lineHeight: 1.4,
@@ -246,7 +255,6 @@ class TextEditorNode extends TextEditorBaseNode {
                     }
                 }
 
-                // ====== 行首禁则处理 ======
                 let fixCount = 0;
                 while (fixCount < 20 && currentLine.length > 0 &&
                        isLineStartForbidden(currentLine[0]) && lines.length > 0) {
@@ -373,28 +381,33 @@ class TextEditorNode extends TextEditorBaseNode {
     createTextEditor() {
         if (this.editTextarea) this.removeTextEditor();
 
+        _cachedFontTime = 0;
+
         const canvas = LGraphCanvas.active_canvas;
         const rect = canvas.canvas.getBoundingClientRect();
         const ox = (this.pos[0] + canvas.ds.offset[0]) * canvas.ds.scale;
         const oy = (this.pos[1] + canvas.ds.offset[1]) * canvas.ds.scale;
+
+        // 菜单与编辑框间距
+        const TOOLBAR_OFFSET = 190;
 
         // ---- 工具栏 ----
         this.editToolbar = document.createElement("div");
         Object.assign(this.editToolbar.style, {
             position: "absolute",
             left: rect.left + ox + "px",
-            top: rect.top + oy - 240 + "px",
+            top: rect.top + oy - TOOLBAR_OFFSET + "px",
             width: "373px", display: "flex", flexDirection: "column",
             gap: "8px", zIndex: "1001", fontSize: "12px", color: "#ffffff"
         });
 
-        // 对齐按钮
+        // ---- 对齐 ----
         const alignRow = document.createElement("div");
         Object.assign(alignRow.style, { display: "flex", alignItems: "center", gap: "8px" });
         const alignLabel = document.createElement("span");
         alignLabel.textContent = getText("textEditorAlignment");
         alignLabel.style.minWidth = "32px";
-        alignLabel.style.fontSize = "14px";
+        alignLabel.style.fontSize = "13px";
         alignRow.appendChild(alignLabel);
 
         this.alignButtons = {};
@@ -422,32 +435,15 @@ class TextEditorNode extends TextEditorBaseNode {
         });
         this.editToolbar.appendChild(alignRow);
 
-        // 颜色选择器
-        const colorRow = document.createElement("div");
-        Object.assign(colorRow.style, { display: "flex", alignItems: "center", gap: "10px" });
-
-        const bgLbl = document.createElement("span");
-        bgLbl.textContent = getText("textEditorBackground");
-        bgLbl.style.minWidth = "32px";
-        bgLbl.style.fontSize = "14px";
-        colorRow.appendChild(bgLbl);
-
-        this.bgColorPicker = document.createElement("input");
-        this.bgColorPicker.type = "color";
-        this.bgColorPicker.value = this.properties.backgroundColor;
-        Object.assign(this.bgColorPicker.style, { width: "56px", height: "24px", border: "none", borderRadius: "3px", cursor: "pointer" });
-        this.bgColorPicker.addEventListener("change", (e) => {
-            this.properties.backgroundColor = e.target.value;
-            this.updateTextareaStyle();
-            app.graph.setDirtyCanvas(true);
-        });
-        colorRow.appendChild(this.bgColorPicker);
+        // ---- 文本（颜色）+ 大小（滑条） ----
+        const textRow = document.createElement("div");
+        Object.assign(textRow.style, { display: "flex", alignItems: "center", gap: "8px" });
 
         const txtLbl = document.createElement("span");
         txtLbl.textContent = getText("textEditorText");
-        txtLbl.style.fontSize = "14px";
-        txtLbl.style.marginLeft = "30px";
-        colorRow.appendChild(txtLbl);
+        txtLbl.style.minWidth = "32px";
+        txtLbl.style.fontSize = "13px";
+        textRow.appendChild(txtLbl);
 
         this.textColorPicker = document.createElement("input");
         this.textColorPicker.type = "color";
@@ -458,17 +454,16 @@ class TextEditorNode extends TextEditorBaseNode {
             this.updateTextareaStyle();
             app.graph.setDirtyCanvas(true);
         });
-        colorRow.appendChild(this.textColorPicker);
-        this.editToolbar.appendChild(colorRow);
+        textRow.appendChild(this.textColorPicker);
 
-        // 字体大小
-        const sizeRow = document.createElement("div");
-        Object.assign(sizeRow.style, { display: "flex", alignItems: "center", gap: "8px" });
+        const textSpacer = document.createElement("div");
+        Object.assign(textSpacer.style, { width: "28px", flexShrink: "0", flexGrow: "0" });
+        textRow.appendChild(textSpacer);
+
         const sizeLbl = document.createElement("span");
         sizeLbl.textContent = getText("textEditorSize");
-        sizeLbl.style.minWidth = "32px";
-        sizeLbl.style.fontSize = "14px";
-        sizeRow.appendChild(sizeLbl);
+        sizeLbl.style.fontSize = "13px";
+        textRow.appendChild(sizeLbl);
 
         this.fontSizeSlider = document.createElement("input");
         this.fontSizeSlider.type = "range";
@@ -482,28 +477,49 @@ class TextEditorNode extends TextEditorBaseNode {
             this.updateTextareaStyle();
             app.graph.setDirtyCanvas(true);
         });
-        sizeRow.appendChild(this.fontSizeSlider);
+        textRow.appendChild(this.fontSizeSlider);
 
         this.fontSizeValue = document.createElement("span");
         this.fontSizeValue.textContent = this.properties.fontSize;
         Object.assign(this.fontSizeValue.style, { fontSize: "12px", minWidth: "25px", textAlign: "right" });
-        sizeRow.appendChild(this.fontSizeValue);
-        this.editToolbar.appendChild(sizeRow);
+        textRow.appendChild(this.fontSizeValue);
+        this.editToolbar.appendChild(textRow);
 
-        // 透明度
-        const alphaRow = document.createElement("div");
-        Object.assign(alphaRow.style, { display: "flex", alignItems: "center", gap: "8px" });
+        // ---- 背景（颜色）+ 透明（滑条） ----
+        const bgRow = document.createElement("div");
+        Object.assign(bgRow.style, { display: "flex", alignItems: "center", gap: "8px" });
+
+        const bgLbl = document.createElement("span");
+        bgLbl.textContent = getText("textEditorBackground");
+        bgLbl.style.minWidth = "32px";
+        bgLbl.style.fontSize = "13px";
+        bgRow.appendChild(bgLbl);
+
+        this.bgColorPicker = document.createElement("input");
+        this.bgColorPicker.type = "color";
+        this.bgColorPicker.value = this.properties.backgroundColor;
+        Object.assign(this.bgColorPicker.style, { width: "56px", height: "24px", border: "none", borderRadius: "3px", cursor: "pointer" });
+        this.bgColorPicker.addEventListener("change", (e) => {
+            this.properties.backgroundColor = e.target.value;
+            this.updateTextareaStyle();
+            app.graph.setDirtyCanvas(true);
+        });
+        bgRow.appendChild(this.bgColorPicker);
+
+        const bgSpacer = document.createElement("div");
+        Object.assign(bgSpacer.style, { width: "28px", flexShrink: "0", flexGrow: "0" });
+        bgRow.appendChild(bgSpacer);
+
         const alphaLbl = document.createElement("span");
         alphaLbl.textContent = getText("textEditorTransparency");
-        alphaLbl.style.minWidth = "25px";
-        alphaLbl.style.fontSize = "14px";
-        alphaRow.appendChild(alphaLbl);
+        alphaLbl.style.fontSize = "13px";
+        bgRow.appendChild(alphaLbl);
 
         this.alphaSlider = document.createElement("input");
         this.alphaSlider.type = "range";
         this.alphaSlider.min = "0";
         this.alphaSlider.max = "1";
-        this.alphaSlider.step = "0.1";
+        this.alphaSlider.step = "0.05";
         this.alphaSlider.value = this.properties.backgroundAlpha;
         Object.assign(this.alphaSlider.style, { flex: "1", height: "20px" });
         this.alphaSlider.addEventListener("input", (e) => {
@@ -512,21 +528,21 @@ class TextEditorNode extends TextEditorBaseNode {
             this.updateTextareaStyle();
             app.graph.setDirtyCanvas(true);
         });
-        alphaRow.appendChild(this.alphaSlider);
+        bgRow.appendChild(this.alphaSlider);
 
         this.alphaValue = document.createElement("span");
         this.alphaValue.textContent = Math.round(100 * this.properties.backgroundAlpha) + "%";
         Object.assign(this.alphaValue.style, { fontSize: "12px", minWidth: "25px", textAlign: "right" });
-        alphaRow.appendChild(this.alphaValue);
-        this.editToolbar.appendChild(alphaRow);
+        bgRow.appendChild(this.alphaValue);
+        this.editToolbar.appendChild(bgRow);
 
-        // 圆角大小滑条
+        // ---- 圆角 ----
         const radiusRow = document.createElement("div");
         Object.assign(radiusRow.style, { display: "flex", alignItems: "center", gap: "8px" });
         const radiusLbl = document.createElement("span");
-        radiusLbl.textContent = "圆角";
+        radiusLbl.textContent = "圆角:";
         radiusLbl.style.minWidth = "32px";
-        radiusLbl.style.fontSize = "14px";
+        radiusLbl.style.fontSize = "13px";
         radiusRow.appendChild(radiusLbl);
 
         this.borderRadiusSlider = document.createElement("input");
@@ -548,13 +564,13 @@ class TextEditorNode extends TextEditorBaseNode {
         radiusRow.appendChild(this.borderRadiusValue);
         this.editToolbar.appendChild(radiusRow);
 
-        // 行高
+        // ---- 行距 ----
         const lhRow = document.createElement("div");
         Object.assign(lhRow.style, { display: "flex", alignItems: "center", gap: "8px" });
         const lhLbl = document.createElement("span");
         lhLbl.textContent = getText("textEditorLineHeight");
-        lhLbl.style.minWidth = "25px";
-        lhLbl.style.fontSize = "14px";
+        lhLbl.style.minWidth = "32px";
+        lhLbl.style.fontSize = "13px";
         lhRow.appendChild(lhLbl);
 
         this.lineHeightSlider = document.createElement("input");
@@ -621,7 +637,7 @@ class TextEditorNode extends TextEditorBaseNode {
             });
             Object.assign(this.editToolbar.style, {
                 left: r.left + ox2 + "px",
-                top: r.top + oy2 - 240 + "px"
+                top: r.top + oy2 - TOOLBAR_OFFSET + "px"
             });
             this.updateTextareaStyle();
         };
@@ -710,21 +726,18 @@ class TextEditorNode extends TextEditorBaseNode {
 
         ctx.imageSmoothingEnabled = true;
 
-        // 绘制圆角背景
         const r = this.properties.borderRadius;
         ctx.beginPath();
         ctx.roundRect(0, 0, this.size[0], this.size[1], r);
         ctx.fillStyle = this.hexToRGBA(this.properties.backgroundColor, this.properties.backgroundAlpha);
         ctx.fill();
 
-        // 编辑中显示绿色边框
         if (this.isEditing) {
             ctx.strokeStyle = "#4CAF50";
             ctx.lineWidth = 2;
             ctx.stroke();
         }
 
-        // 绘制文本（不裁剪，允许上下溢出背景框，左右由换行逻辑保证不溢出）
         if (!this.isEditing) {
             ctx.fillStyle = this.properties.fontColor;
             ctx.font = this.properties.fontSize + "px " + getComfyUIFont();
@@ -858,14 +871,13 @@ TextEditorNode["@fontSize"] = { type: "number", title: getText("textEditorFontSi
 TextEditorNode["@fontColor"] = { type: "color", title: getText("textEditorFontColor"), default: "#E3E3E3" };
 TextEditorNode["@backgroundColor"] = { type: "color", title: getText("textEditorBackgroundColor"), default: "#1B4669" };
 TextEditorNode["@backgroundAlpha"] = { type: "number", title: getText("textEditorBackgroundAlpha"), default: 0.8, min: 0, max: 1, step: 0.1 };
-TextEditorNode["@borderRadius"] = { type: "number", title: "圆角", default: 30, min: 0, max: 300, step: 1 };
+TextEditorNode["@borderRadius"] = { type: "number", title: "圆角:", default: 30, min: 0, max: 300, step: 1 };
 TextEditorNode["@padding"] = { type: "number", title: getText("textEditorPadding"), default: 10, min: 0, max: 50, step: 1 };
 TextEditorNode["@lineHeight"] = { type: "number", title: getText("textEditorLineSpacing"), default: 1.4, min: 0.8, max: 3, step: 0.1 };
 TextEditorNode["@textAlign"] = { type: "combo", title: getText("textEditorTextAlign"), values: ["left", "center", "right"], default: "center" };
 
 // ==================== 画布事件补丁 ====================
 
-// drawNode 补丁：运行时动态设置 bgcolor 为 transparent，阻止 LiteGraph 绘制默认背景
 const _origDrawNode = LGraphCanvas.prototype.drawNode;
 LGraphCanvas.prototype.drawNode = function (node, ctx) {
     if (node.constructor === TextEditorNode) {
@@ -878,7 +890,6 @@ LGraphCanvas.prototype.drawNode = function (node, ctx) {
     return _origDrawNode.apply(this, arguments);
 };
 
-// processMouseDown：拦截链接点击
 const _origPMDown = LGraphCanvas.prototype.processMouseDown;
 LGraphCanvas.prototype.processMouseDown = function (e) {
     if (!this.graph) return;
