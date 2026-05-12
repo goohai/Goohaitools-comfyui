@@ -657,16 +657,15 @@ function buildIgnoreGroupsUI(node) {
                 return true;
             }
 
-            /* ── 开关点击 ── */
+            /* ── 整行点击开关 ── */
             const list = visible();
             for (let i = 0; i < list.length; i++) {
+                const rowX = PAD_X;
                 const rowY = HEADER_H + i * (ROW_H + ROW_GAP);
                 const rowW = _w - PAD_X * 2;
-                const tx = PAD_X + rowW - ROW_PAD_R - TOGGLE_W;
-                const ty = rowY + (ROW_H - TOGGLE_H) / 2;
 
-                if (localX >= tx && localX <= tx + TOGGLE_W &&
-                    localY >= ty && localY <= ty + TOGGLE_H) {
+                if (localX >= rowX && localX <= rowX + rowW &&
+                    localY >= rowY && localY <= rowY + ROW_H) {
                     handleToggle(list[i].title);
                     return true;
                 }

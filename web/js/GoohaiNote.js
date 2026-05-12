@@ -1,136 +1,227 @@
 /**
- * 孤海注释 - ComfyUI 自定义文本编辑器节点
- *
- * 功能：
- * - 双击编辑文本，支持自动换行
- * - 支持自动检测网址链接
- * - 字体大小、颜色、背景色、透明度、行高、对齐方式、圆角可调
- * - 固定（pinned）模式：节点不可交互，点击穿透
- * - 文本垂直居中显示，允许溢出背景框
+ * 孤海注释 - ComfyUI 自定义文本编辑器节点 *
  */
 
 import { app } from "../../../scripts/app.js";
 
-// ==================== 国际化辅助 ====================
-const getText = function (key) {
-    return window.CyberpunkI18n && window.CyberpunkI18n.getText
-        ? window.CyberpunkI18n.getText(key)
-        : window.getText && typeof window.getText === "function"
-            ? window.getText(key)
-            : key;
-};
-
 // ==================== 模块级工具常量与函数 ====================
-const LINK_REGEX = /#([^#]+)#|(https?:\/\/\S+)|(www\.\S+)/g;
+
+// URL 安全字符集（RFC 3986 + 常见字符）
+const _URL_CHARS = "a-zA-Z0-9._~:/?#\\[\\]@!$&'()*+,;=%\\-";
+
+// 链接匹配正则
+const LINK_REGEX = new RegExp(
+    "(\\[\\[(.+?)\\]\\])" +
+    "|(https?:\\/\\/[" + _URL_CHARS + "]+)" +
+    "|(www\\.[" + _URL_CHARS + "]+)",
+    "g"
+);
+
 const isChinese = (ch) => /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/.test(ch);
 const isBreakPoint = (ch) => /[\s\p{P}\p{S}]/u.test(ch);
 const isPunct = (ch) => /\p{P}|\p{S}/.test(ch);
 
-const CJK_PUNCT = new Set(
+const CJK_PUNCT_SET = new Set(
     '，。、！？：；「」『』【】《》（）\u201C\u201D\u2018\u2019—…～．'.split('')
 );
-const isCJKPunct = (ch) => CJK_PUNCT.has(ch);
+const isCJKPunct = (ch) => CJK_PUNCT_SET.has(ch);
 const isCJKLike = (ch) => isChinese(ch) || isCJKPunct(ch);
 
 const LINE_START_FORBIDDEN = new Set([
-    ',', '，',
-    '.', '。',
-    ';', '；',
-    '!', '！',
-    '\u201D', '\u2019',
-    '」', '』',
+    ',', '，', '.', '。', ';', '；', '!', '！',
+    '\u201D', '\u2019', '」', '』',
 ]);
 const isLineStartForbidden = (ch) => LINE_START_FORBIDDEN.has(ch);
 
-// ==================== ComfyUI 字体获取工具（TTL 缓存） ====================
+// ==================== ComfyUI 字体获取（TTL 缓存） ====================
+
 let _cachedComfyFont = null;
 let _cachedFontTime = 0;
-const FONT_CACHE_TTL = 3000; 
+const FONT_CACHE_TTL = 3000;
 
 function getComfyUIFont() {
     const now = Date.now();
-    if (_cachedComfyFont && (now - _cachedFontTime) < FONT_CACHE_TTL) {
-        return _cachedComfyFont;
-    }
+    if (_cachedComfyFont && (now - _cachedFontTime) < FONT_CACHE_TTL) return _cachedComfyFont;
 
-    // ---- 策略1：从 CSS 自定义变量中读取 ----
-    const rootStyle = getComputedStyle(document.documentElement);
-    const cssVarNames = [
-        '--font-family', '--fontFamily', '--p-font-family',
-        '--ui-font-family', '--body-font-family'
-    ];
-    for (const varName of cssVarNames) {
-        const val = rootStyle.getPropertyValue(varName).trim();
+    const root = getComputedStyle(document.documentElement);
+    for (const v of ['--font-family', '--fontFamily', '--p-font-family', '--ui-font-family', '--body-font-family']) {
+        const val = root.getPropertyValue(v).trim();
         if (val && val !== '' && val !== 'inherit' && val !== 'initial') {
-            _cachedComfyFont = val;
-            _cachedFontTime = Date.now();
-            return _cachedComfyFont;
+            _cachedComfyFont = val; _cachedFontTime = now; return val;
         }
     }
 
-    // ---- 策略2：从 ComfyUI 关键 DOM 节点读取计算后的 font-family ----
-    const selectors = [
-        '.p-panelmenu .p-panelmenu-item-content',
-        '.p-panelmenu',
-        '.comfy-multiline-input',
-        '.litegraph .dialog',
-        '.p-button',
-        '.p-menubar',
-        '.p-sidebar',
-        '#vue-app',
-        '#app',
-        '.graph-canvas-container',
-    ];
-
-    for (const sel of selectors) {
+    for (const sel of ['.p-panelmenu .p-panelmenu-item-content', '.p-panelmenu', '.comfy-multiline-input', '.litegraph .dialog', '.p-button', '#vue-app', '#app']) {
         const el = document.querySelector(sel);
         if (el) {
             const ff = getComputedStyle(el).fontFamily;
-            if (ff && ff.trim() !== '' && !ff.includes('serif')) {
-                if (!/^["']?serif/i.test(ff.trim()) && ff.trim().toLowerCase() !== 'serif') {
-                    _cachedComfyFont = ff;
-                    _cachedFontTime = Date.now();
-                    return _cachedComfyFont;
-                }
+            if (ff && ff.trim() !== '' && !/^["']?serif/i.test(ff.trim())) {
+                _cachedComfyFont = ff; _cachedFontTime = now; return ff;
             }
         }
     }
 
-    // ---- 策略3：遍历页面上可见的文本元素，取第一个非 serif 字体 ----
-    const walkTargets = document.querySelectorAll(
-        'button, label, span, p, h1, h2, h3, h4, a, li, .p-component'
-    );
+    const walkTargets = document.querySelectorAll('button, label, span, p, h1, h2, h3, h4, a, li, .p-component');
     for (const el of walkTargets) {
         const ff = getComputedStyle(el).fontFamily;
         if (ff && ff.trim() !== '') {
             const lower = ff.trim().toLowerCase();
             if (lower !== 'serif' && !lower.startsWith('serif,')) {
-                _cachedComfyFont = ff;
-                _cachedFontTime = Date.now();
-                return _cachedComfyFont;
+                _cachedComfyFont = ff; _cachedFontTime = now; return ff;
             }
         }
     }
 
-    // ---- 策略4：硬编码 ComfyUI 前端默认字体栈（含等线 DengXian） ----
-    _cachedComfyFont = [
-        '-apple-system',
-        'BlinkMacSystemFont',
-        '"Segoe UI"',
-        'DengXian',
-        'Roboto',
-        '"Helvetica Neue"',
-        '"Noto Sans"',
-        '"Microsoft YaHei"',
-        '"PingFang SC"',
-        'sans-serif'
-    ].join(', ');
-
-    _cachedFontTime = Date.now();
+    _cachedComfyFont = '-apple-system, BlinkMacSystemFont, "Segoe UI", DengXian, Roboto, "Helvetica Neue", "Noto Sans", "Microsoft YaHei", "PingFang SC", sans-serif';
+    _cachedFontTime = now;
     return _cachedComfyFont;
 }
 
+// ==================== 链接解析与字符级换行 ====================
+
+/**
+ * 将文本解析为语义段落数组
+ */
+function parseSegments(text) {
+    LINK_REGEX.lastIndex = 0;
+    const segments = [];
+    let match, last = 0;
+    while ((match = LINK_REGEX.exec(text)) !== null) {
+        if (match.index > last)
+            segments.push({ type: 'text', content: text.substring(last, match.index), url: null });
+        if (match[1] !== undefined) {
+            // [[链接]] 语法
+            segments.push({ type: 'link', content: match[2], url: match[2] });
+        } else if (match[3] !== undefined) {
+            segments.push({ type: 'link', content: match[3], url: match[3] });
+        } else if (match[4] !== undefined) {
+            segments.push({ type: 'link', content: match[4], url: match[4] });
+        }
+        last = match.index + match[0].length;
+    }
+    if (last < text.length)
+        segments.push({ type: 'text', content: text.substring(last), url: null });
+    return segments;
+}
+
+/**
+ * 将语义段落展开为带类型标记的字符数组
+ * 每个元素: { ch, type: 'text'|'link', url: string|null }
+ */
+function buildCharList(segments) {
+    const list = [];
+    for (const seg of segments) {
+        for (const ch of seg.content) {
+            list.push({ ch, type: seg.type, url: seg.url });
+        }
+    }
+    return list;
+}
+
+/**
+ * 对带类型标记的字符数组执行自动换行
+ */
+function wrapCharList(ctx, charList, maxWidth) {
+    if (!charList || charList.length === 0) return [[]];
+
+    const lines = [];
+    let line = [];
+    let lineStr = '';
+
+    const rebuild = () => { lineStr = line.map(c => c.ch).join(''); };
+
+    for (let i = 0; i < charList.length; i++) {
+        const c = charList[i];
+
+        if (c.ch === '\n') {
+            lines.push(line);
+            line = [];
+            lineStr = '';
+            continue;
+        }
+
+        const test = lineStr + c.ch;
+
+        if (ctx.measureText(test).width > maxWidth && line.length > 0) {
+
+            if (isCJKLike(c.ch)) {
+                lines.push(line);
+                line = [c];
+                lineStr = c.ch;
+            } else {
+                let lastCJK = -1;
+                for (let k = line.length - 1; k >= 0; k--) {
+                    if (isCJKLike(line[k].ch)) { lastCJK = k; break; }
+                }
+
+                if (lastCJK >= 0) {
+                    lines.push(line.slice(0, lastCJK + 1));
+                    line = [...line.slice(lastCJK + 1), c];
+                    rebuild();
+                } else {
+                    const limit = Math.min(20, line.length);
+                    let bp = -1;
+                    for (let j = line.length - 1; j >= line.length - limit; j--) {
+                        if (isBreakPoint(line[j].ch)) { bp = j; break; }
+                    }
+
+                    if (bp >= 0) {
+                        lines.push(line.slice(0, bp + 1));
+                        line = [...line.slice(bp + 1), c];
+                        rebuild();
+                        if (line.length > 0 && isPunct(line[0].ch)) {
+                            let pEnd = 0;
+                            while (pEnd < line.length && isPunct(line[pEnd].ch)) pEnd++;
+                            lines[lines.length - 1] = [...lines[lines.length - 1], ...line.slice(0, pEnd)];
+                            line = line.slice(pEnd);
+                            rebuild();
+                        }
+                    } else if (isPunct(c.ch)) {
+                        lines.push([...line, c]);
+                        line = [];
+                        lineStr = '';
+                    } else {
+                        lines.push(line);
+                        line = [c];
+                        lineStr = c.ch;
+                    }
+                }
+            }
+
+            // 行首禁排字符
+            let fix = 0;
+            while (fix++ < 20 && line.length > 0 && isLineStartForbidden(line[0].ch) && lines.length > 0) {
+                const prev = lines[lines.length - 1];
+                if (!prev || prev.length <= 1) break;
+                const last = prev[prev.length - 1];
+                if (isCJKLike(last.ch)) {
+                    line = [last, ...line];
+                    lines[lines.length - 1] = prev.slice(0, -1);
+                } else if (!isBreakPoint(last.ch)) {
+                    let ws = prev.length - 1;
+                    while (ws > 0 && !isBreakPoint(prev[ws - 1].ch)) ws--;
+                    if (ws === 0) {
+                        line = [last, ...line];
+                        lines[lines.length - 1] = prev.slice(0, -1);
+                    } else {
+                        line = [...prev.slice(ws), ...line];
+                        lines[lines.length - 1] = prev.slice(0, ws);
+                    }
+                } else break;
+                rebuild();
+            }
+        } else {
+            line.push(c);
+            lineStr = test;
+        }
+    }
+
+    if (line.length > 0) lines.push(line);
+    return lines.length > 0 ? lines : [[]];
+}
+
 // ==================== 基础节点类 ====================
+
 class TextEditorBaseNode extends LGraphNode {
     constructor(title) {
         super(title);
@@ -169,6 +260,7 @@ class TextEditorBaseNode extends LGraphNode {
 }
 
 // ==================== 文本编辑器节点 ====================
+
 class TextEditorNode extends TextEditorBaseNode {
 
     constructor(title) {
@@ -195,170 +287,67 @@ class TextEditorNode extends TextEditorBaseNode {
         this.linkAreas = [];
     }
 
-    /* ---------- 文本处理 ---------- */
-
-    wrapText(ctx, text, maxWidth) {
-        if (!text || text.trim() === "") return [""];
-
-        const lines = [];
-        let currentLine = "";
-
-        for (let i = 0; i < text.length; i++) {
-            const ch = text[i];
-            const testLine = currentLine + ch;
-
-            if (ctx.measureText(testLine).width > maxWidth && currentLine.length > 0) {
-
-                if (isCJKLike(ch)) {
-                    lines.push(currentLine);
-                    currentLine = ch;
-                } else {
-                    let lastCJKIdx = -1;
-                    for (let k = currentLine.length - 1; k >= 0; k--) {
-                        if (isCJKLike(currentLine[k])) {
-                            lastCJKIdx = k;
-                            break;
-                        }
-                    }
-
-                    if (lastCJKIdx >= 0) {
-                        lines.push(currentLine.substring(0, lastCJKIdx + 1));
-                        currentLine = currentLine.substring(lastCJKIdx + 1) + ch;
-                    } else {
-                        const searchLimit = Math.min(20, currentLine.length);
-                        let breakIndex = -1;
-                        for (let j = currentLine.length - 1; j >= currentLine.length - searchLimit; j--) {
-                            if (isBreakPoint(currentLine[j])) {
-                                breakIndex = j;
-                                break;
-                            }
-                        }
-
-                        if (breakIndex >= 0) {
-                            lines.push(currentLine.substring(0, breakIndex + 1));
-                            currentLine = currentLine.substring(breakIndex + 1) + ch;
-                            if (currentLine.length > 0 && isPunct(currentLine[0])) {
-                                let pEnd = 0;
-                                while (pEnd < currentLine.length && isPunct(currentLine[pEnd])) pEnd++;
-                                lines[lines.length - 1] += currentLine.substring(0, pEnd);
-                                currentLine = currentLine.substring(pEnd);
-                            }
-                        } else {
-                            if (isPunct(ch)) {
-                                lines.push(currentLine + ch);
-                                currentLine = "";
-                            } else {
-                                lines.push(currentLine);
-                                currentLine = ch;
-                            }
-                        }
-                    }
-                }
-
-                let fixCount = 0;
-                while (fixCount < 20 && currentLine.length > 0 &&
-                       isLineStartForbidden(currentLine[0]) && lines.length > 0) {
-                    fixCount++;
-                    const lastLine = lines[lines.length - 1];
-                    if (!lastLine || lastLine.length <= 1) break;
-
-                    const lastChar = lastLine[lastLine.length - 1];
-                    if (isCJKLike(lastChar)) {
-                        currentLine = lastChar + currentLine;
-                        lines[lines.length - 1] = lastLine.substring(0, lastLine.length - 1);
-                    } else if (!isBreakPoint(lastChar)) {
-                        let wordStart = lastLine.length - 1;
-                        while (wordStart > 0 && !isBreakPoint(lastLine[wordStart - 1])) {
-                            wordStart--;
-                        }
-                        if (wordStart === 0) {
-                            currentLine = lastChar + currentLine;
-                            lines[lines.length - 1] = lastLine.substring(0, lastLine.length - 1);
-                        } else {
-                            const pulled = lastLine.substring(wordStart);
-                            currentLine = pulled + currentLine;
-                            lines[lines.length - 1] = lastLine.substring(0, wordStart);
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            } else {
-                currentLine = testLine;
-            }
-        }
-
-        if (currentLine) lines.push(currentLine);
-        return lines.length > 0 ? lines : [""];
-    }
-
-    parseTextWithLinks(text) {
-        LINK_REGEX.lastIndex = 0;
-        const segments = [];
-        let match, last = 0;
-        while ((match = LINK_REGEX.exec(text)) !== null) {
-            if (match.index > last)
-                segments.push({ type: "text", content: text.substring(last, match.index) });
-            if (match[1] !== undefined) {
-                segments.push({ type: "link", content: match[1], fullMatch: match[0] });
-            } else {
-                segments.push({ type: "link", content: match[0], fullMatch: match[0] });
-            }
-            last = match.index + match[0].length;
-        }
-        if (last < text.length)
-            segments.push({ type: "text", content: text.substring(last) });
-        return segments;
-    }
-
-    processTextLines(ctx, text, maxWidth) {
-        const raw = text.replace(/\\n/g, "\n").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-        let result = [];
-        for (const line of raw) {
-            if (line.trim() === "") {
-                result.push("");
-            } else {
-                result = result.concat(this.wrapText(ctx, line, maxWidth));
-            }
-        }
-        return result;
-    }
+    /* ---------- 字符级多行文本绘制 ---------- */
 
     drawMultilineText(ctx, text, maxWidth, lineHeight) {
         this.linkAreas = [];
-        const lines = this.processTextLines(ctx, text, maxWidth);
-        const totalTextHeight = (lines.length - 1) * lineHeight + this.properties.fontSize;
-        const startY = (this.size[1] - totalTextHeight) / 2 + this.properties.fontSize / 10;
+
+
+        const processed = text
+            .replace(/\\n/g, "\n")
+            .replace(/\r\n/g, "\n")
+            .replace(/\r/g, "\n");
+
+        const segments = parseSegments(processed);
+        const chars = buildCharList(segments);
+        const lines = wrapCharList(ctx, chars, maxWidth);
+
+        if (lines.length === 0) return;
+
+        const totalHeight = (lines.length - 1) * lineHeight + this.properties.fontSize;
+        const startY = (this.size[1] - totalHeight) / 2 + this.properties.fontSize / 10;
         ctx.textBaseline = "top";
 
-        lines.forEach((line, idx) => {
+        for (let idx = 0; idx < lines.length; idx++) {
+            const lineChars = lines[idx];
+            if (lineChars.length === 0) continue;
             const y = startY + idx * lineHeight;
-            let x;
-            if ("left" === this.properties.textAlign) {
-                ctx.textAlign = "left"; x = this.properties.padding;
-            } else if ("right" === this.properties.textAlign) {
-                ctx.textAlign = "right"; x = this.size[0] - this.properties.padding;
+
+
+            const groups = [];
+            let gi = 0;
+            while (gi < lineChars.length) {
+                const { type, url } = lineChars[gi];
+                let gj = gi;
+                while (gj < lineChars.length && lineChars[gj].type === type && lineChars[gj].url === url) gj++;
+                groups.push({
+                    type, url,
+                    text: lineChars.slice(gi, gj).map(c => c.ch).join('')
+                });
+                gi = gj;
+            }
+
+            // 计算行起始 x（根据对齐方式）
+            const totalW = groups.reduce((s, g) => s + ctx.measureText(g.text).width, 0);
+            let startX;
+            if (this.properties.textAlign === "left") {
+                startX = this.properties.padding;
+            } else if (this.properties.textAlign === "right") {
+                startX = this.size[0] - this.properties.padding - totalW;
             } else {
-                ctx.textAlign = "center"; x = this.size[0] / 2;
+                startX = (this.size[0] - totalW) / 2;
             }
 
-            const segs = this.parseTextWithLinks(line);
-            let dx = x;
+            ctx.textAlign = "left";
+            let dx = startX;
 
-            if ("center" === this.properties.textAlign || "right" === this.properties.textAlign) {
-                const tw = segs.reduce((s, seg) => s + ctx.measureText(seg.content).width, 0);
-                dx = "center" === this.properties.textAlign
-                    ? (this.size[0] - tw) / 2
-                    : this.size[0] - this.properties.padding - tw;
-                ctx.textAlign = "left";
-            }
-
-            segs.forEach((seg) => {
-                if ("link" === seg.type) {
-                    const w = ctx.measureText(seg.content).width;
-                    this.linkAreas.push({ x: dx, y, width: w, height: lineHeight, url: seg.content });
+            for (const g of groups) {
+                const w = ctx.measureText(g.text).width;
+                if (g.type === 'link') {
+                    this.linkAreas.push({ x: dx, y, width: w, height: lineHeight, url: g.url });
                     ctx.fillStyle = "#1976D2";
-                    ctx.fillText(seg.content, dx, y);
+                    ctx.fillText(g.text, dx, y);
+                    // 下划线
                     const uy = y + this.properties.fontSize;
                     ctx.beginPath();
                     ctx.moveTo(dx, uy + 1);
@@ -366,14 +355,13 @@ class TextEditorNode extends TextEditorBaseNode {
                     ctx.strokeStyle = "#1976D2";
                     ctx.lineWidth = 1;
                     ctx.stroke();
-                    ctx.fillStyle = this.properties.fontColor;
-                    dx += w;
                 } else {
-                    ctx.fillText(seg.content, dx, y);
-                    dx += ctx.measureText(seg.content).width;
+                    ctx.fillStyle = this.properties.fontColor;
+                    ctx.fillText(g.text, dx, y);
                 }
-            });
-        });
+                dx += w;
+            }
+        }
     }
 
     /* ---------- 编辑器管理 ---------- */
@@ -388,7 +376,6 @@ class TextEditorNode extends TextEditorBaseNode {
         const ox = (this.pos[0] + canvas.ds.offset[0]) * canvas.ds.scale;
         const oy = (this.pos[1] + canvas.ds.offset[1]) * canvas.ds.scale;
 
-        // 菜单与编辑框间距
         const TOOLBAR_OFFSET = 190;
 
         // ---- 工具栏 ----
@@ -405,23 +392,22 @@ class TextEditorNode extends TextEditorBaseNode {
         const alignRow = document.createElement("div");
         Object.assign(alignRow.style, { display: "flex", alignItems: "center", gap: "8px" });
         const alignLabel = document.createElement("span");
-        alignLabel.textContent = getText("textEditorAlignment");
+        alignLabel.textContent = "对齐:";
         alignLabel.style.minWidth = "32px";
         alignLabel.style.fontSize = "13px";
         alignRow.appendChild(alignLabel);
 
         this.alignButtons = {};
         [
-            { key: "left", symbol: getText("textEditorAlignLeftBtn"), title: getText("textEditorAlignLeft") },
-            { key: "center", symbol: getText("textEditorAlignCenterBtn"), title: getText("textEditorAlignCenter") },
-            { key: "right", symbol: getText("textEditorAlignRightBtn"), title: getText("textEditorAlignRight") }
+            { key: "left", symbol: "⬅" },
+            { key: "center", symbol: "⬌" },
+            { key: "right", symbol: "➡" }
         ].forEach((opt) => {
             const btn = document.createElement("button");
             btn.textContent = opt.symbol;
-            btn.title = opt.title;
             Object.assign(btn.style, {
                 width: "28px", height: "24px", border: "1px solid #666",
-                borderRadius: "3px", cursor: "pointer", fontSize: "10px",
+                borderRadius: "3px", cursor: "pointer", fontSize: "12px",
                 backgroundColor: this.properties.textAlign === opt.key ? "#459BAC" : "#444",
                 color: "#fff", display: "flex", alignItems: "center", justifyContent: "center"
             });
@@ -440,7 +426,7 @@ class TextEditorNode extends TextEditorBaseNode {
         Object.assign(textRow.style, { display: "flex", alignItems: "center", gap: "8px" });
 
         const txtLbl = document.createElement("span");
-        txtLbl.textContent = getText("textEditorText");
+        txtLbl.textContent = "文本:";
         txtLbl.style.minWidth = "32px";
         txtLbl.style.fontSize = "13px";
         textRow.appendChild(txtLbl);
@@ -461,7 +447,7 @@ class TextEditorNode extends TextEditorBaseNode {
         textRow.appendChild(textSpacer);
 
         const sizeLbl = document.createElement("span");
-        sizeLbl.textContent = getText("textEditorSize");
+        sizeLbl.textContent = "大小:";
         sizeLbl.style.fontSize = "13px";
         textRow.appendChild(sizeLbl);
 
@@ -490,7 +476,7 @@ class TextEditorNode extends TextEditorBaseNode {
         Object.assign(bgRow.style, { display: "flex", alignItems: "center", gap: "8px" });
 
         const bgLbl = document.createElement("span");
-        bgLbl.textContent = getText("textEditorBackground");
+        bgLbl.textContent = "背景:";
         bgLbl.style.minWidth = "32px";
         bgLbl.style.fontSize = "13px";
         bgRow.appendChild(bgLbl);
@@ -511,7 +497,7 @@ class TextEditorNode extends TextEditorBaseNode {
         bgRow.appendChild(bgSpacer);
 
         const alphaLbl = document.createElement("span");
-        alphaLbl.textContent = getText("textEditorTransparency");
+        alphaLbl.textContent = "透明:";
         alphaLbl.style.fontSize = "13px";
         bgRow.appendChild(alphaLbl);
 
@@ -568,7 +554,7 @@ class TextEditorNode extends TextEditorBaseNode {
         const lhRow = document.createElement("div");
         Object.assign(lhRow.style, { display: "flex", alignItems: "center", gap: "8px" });
         const lhLbl = document.createElement("span");
-        lhLbl.textContent = getText("textEditorLineHeight");
+        lhLbl.textContent = "行距:";
         lhLbl.style.minWidth = "32px";
         lhLbl.style.fontSize = "13px";
         lhRow.appendChild(lhLbl);
@@ -649,7 +635,7 @@ class TextEditorNode extends TextEditorBaseNode {
         };
         this.canvasUpdateInterval = setInterval(() => this.updateEditorsPosition(), 16);
 
-        // 键盘：Esc 关闭，Ctrl/Cmd+Enter 保存
+        // 键盘事件
         this.editTextarea.addEventListener("keydown", (e) => {
             if ("Escape" === e.key) {
                 this.removeTextEditor();
@@ -723,7 +709,6 @@ class TextEditorNode extends TextEditorBaseNode {
 
     onDrawBackground(ctx) {
         ctx.save();
-
         ctx.imageSmoothingEnabled = true;
 
         const r = this.properties.borderRadius;
@@ -809,18 +794,12 @@ class TextEditorNode extends TextEditorBaseNode {
 
     openLink(url) {
         try {
-            if (!url.match(/^https?:\/\//)) url = "https://" + url;
-            const msg = getText("linkOpenConfirm") + "\n\n" + getText("linkOpenUrl") + url;
-            if (confirm(msg)) {
-                if (typeof window !== "undefined" && window.open) {
-                    window.open(url, "_blank");
-                } else {
-                    console.log("Opening: " + url);
-                }
+            if (!url.match(/^https?:\/\//) && !url.match(/^www\./)) {
+                url = "https://" + url;
             }
+            window.open(url, "_blank");
         } catch (err) {
-            console.error(getText("linkOpenError") + ":", err);
-            alert(getText("linkOpenError") + ": " + url);
+            console.error("打开链接失败:", err);
         }
     }
 
@@ -838,11 +817,11 @@ class TextEditorNode extends TextEditorBaseNode {
 
     getExtraMenuOptions(node, options) {
         options.unshift({
-            content: getText("textEditorEdit"),
+            content: "编辑文本",
             callback: () => this.createTextEditor()
         });
         options.push({
-            content: getText("textEditorPin"),
+            content: "固定节点",
             callback: () => {
                 this.flags.pinned = !this.flags.pinned;
                 this.flags.allow_interaction = !this.flags.pinned;
@@ -861,20 +840,21 @@ class TextEditorNode extends TextEditorBaseNode {
 }
 
 // ==================== 静态属性与控件定义 ====================
+
 TextEditorNode.type = "孤海注释";
-TextEditorNode.title = getText("textEditorTitle");
+TextEditorNode.title = "孤海注释";
 TextEditorNode.title_mode = LiteGraph.NO_TITLE;
 TextEditorNode.collapsable = false;
 
-TextEditorNode["@text"] = { type: "string", title: getText("textEditorContent"), default: "双击编辑文本内容...", multiline: true };
-TextEditorNode["@fontSize"] = { type: "number", title: getText("textEditorFontSize"), default: 24, min: 8, max: 32, step: 1 };
-TextEditorNode["@fontColor"] = { type: "color", title: getText("textEditorFontColor"), default: "#E3E3E3" };
-TextEditorNode["@backgroundColor"] = { type: "color", title: getText("textEditorBackgroundColor"), default: "#1B4669" };
-TextEditorNode["@backgroundAlpha"] = { type: "number", title: getText("textEditorBackgroundAlpha"), default: 0.8, min: 0, max: 1, step: 0.1 };
-TextEditorNode["@borderRadius"] = { type: "number", title: "圆角:", default: 30, min: 0, max: 300, step: 1 };
-TextEditorNode["@padding"] = { type: "number", title: getText("textEditorPadding"), default: 10, min: 0, max: 50, step: 1 };
-TextEditorNode["@lineHeight"] = { type: "number", title: getText("textEditorLineSpacing"), default: 1.4, min: 0.8, max: 3, step: 0.1 };
-TextEditorNode["@textAlign"] = { type: "combo", title: getText("textEditorTextAlign"), values: ["left", "center", "right"], default: "center" };
+TextEditorNode["@text"] = { type: "string", title: "文本内容", default: "双击编辑文本内容...", multiline: true };
+TextEditorNode["@fontSize"] = { type: "number", title: "字体大小", default: 24, min: 8, max: 200, step: 1 };
+TextEditorNode["@fontColor"] = { type: "color", title: "字体颜色", default: "#E3E3E3" };
+TextEditorNode["@backgroundColor"] = { type: "color", title: "背景颜色", default: "#1B4669" };
+TextEditorNode["@backgroundAlpha"] = { type: "number", title: "背景透明度", default: 0.6, min: 0, max: 1, step: 0.05 };
+TextEditorNode["@borderRadius"] = { type: "number", title: "圆角", default: 30, min: 0, max: 300, step: 1 };
+TextEditorNode["@padding"] = { type: "number", title: "内边距", default: 12, min: 0, max: 50, step: 1 };
+TextEditorNode["@lineHeight"] = { type: "number", title: "行距", default: 1.4, min: 0.8, max: 3, step: 0.1 };
+TextEditorNode["@textAlign"] = { type: "combo", title: "对齐方式", values: ["left", "center", "right"], default: "center" };
 
 // ==================== 画布事件补丁 ====================
 
@@ -913,6 +893,7 @@ LGraphCanvas.prototype.processMouseDown = function (e) {
 };
 
 // ==================== pinned 节点点击穿透 ====================
+
 const mouseState = { processingMouseDown: false, lastMouseEvent: null };
 
 const _origGNOP = LGraph.prototype.getNodeOnPos;
@@ -940,6 +921,7 @@ document.addEventListener("mouseup", function () {
 }, true);
 
 // ==================== 注册 ComfyUI 扩展 ====================
+
 app.registerExtension({
     name: "孤海注释",
     registerCustomNodes() {
