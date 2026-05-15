@@ -589,6 +589,7 @@ app.registerExtension({
 
             const galleryWidget = node.addDOMWidget("clothing_gallery", "div", container, {
                 serialize: false,
+                hideOnZoom: false,
             });
 
             galleryWidget.computeSize = () => [0, 0];

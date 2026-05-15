@@ -19,7 +19,7 @@ app.registerExtension({
             if (this._guhaiSyncGroups) this._guhaiSyncGroups();
         };
 
-        /* 右键上下文菜单 —— 优先级最高（第一位） */
+        /* 右键上下文菜单  */
         const origGetExtra = nodeType.prototype.getExtraMenuOptions;
         nodeType.prototype.getExtraMenuOptions = function (canvas, options) {
             if (origGetExtra) origGetExtra.apply(this, arguments);
@@ -47,6 +47,9 @@ function buildIgnoreGroupsUI(node) {
     let active    = null;
     let activeSet = null;
     let nameColor = null;
+    let igDisable = false;
+    let selfChanging = false;
+    let dirty         = true;
 
     if (node.properties) {
         if (node.properties.guhai_ig_filter     != null) filter    = node.properties.guhai_ig_filter;
@@ -54,6 +57,7 @@ function buildIgnoreGroupsUI(node) {
         if (node.properties.guhai_ig_active     != null) active    = node.properties.guhai_ig_active;
         if (node.properties.guhai_ig_active_set != null) activeSet = node.properties.guhai_ig_active_set;
         if (node.properties.guhai_ig_name_color != null) nameColor = node.properties.guhai_ig_name_color;
+        if (node.properties.guhai_ig_disable    != null) igDisable = !!node.properties.guhai_ig_disable;
     }
 
     function save() {
@@ -63,19 +67,20 @@ function buildIgnoreGroupsUI(node) {
         node.properties.guhai_ig_active     = active;
         node.properties.guhai_ig_active_set = activeSet;
         node.properties.guhai_ig_name_color = nameColor;
+        node.properties.guhai_ig_disable    = igDisable;
     }
 
 
     /* ═══════════════════ Canvas 布局常量 ═══════════════════ */
-    const HEADER_H  = 14;    /* 齿轮图标区域高度  */
-    const ROW_H     = 34;   /* 每行高度          */
-    const ROW_GAP   = 15;   /* 行间距            */
-    const PAD_X     = 16;   /* 水平内边距（左右各缩进量） */
-    const ROW_PAD_L = 26;   /* 行内左边距        */
-    const ROW_PAD_R = 16;   /* 行内右边距        */
-    const TOGGLE_W  = 67;   /* 开关轨道宽度      */
-    const TOGGLE_H  = 26;   /* 开关轨道高度      */
-    const KNOB_R    = 11;   /* 旋钮半径          */
+    const HEADER_H  = 14;
+    const ROW_H     = 34;
+    const ROW_GAP   = 15;
+    const PAD_X     = 16;
+    const ROW_PAD_L = 26;
+    const ROW_PAD_R = 16;
+    const TOGGLE_W  = 67;
+    const TOGGLE_H  = 26;
+    const KNOB_R    = 11;
 
 
     /* ═══════════════════ 几何工具 ═══════════════════ */
@@ -167,11 +172,83 @@ function buildIgnoreGroupsUI(node) {
 
 
     /* ═══════════════════ 旁路 / 恢复 ═══════════════════ */
-    function bypassGroup(grp)  { collectNodes(grp).forEach(n => { n.mode = 4; }); }
-    function restoreGroup(grp) { collectNodes(grp).forEach(n => { n.mode = 0; }); }
+    function bypassGroup(grp) {
+        collectNodes(grp).forEach(n => {
+            if (igDisable) {
+                n.mode = 2;
+            } else {
+                n.mode = 4;
+            }
+        });
+    }
+
+    function restoreGroup(grp) {
+        collectNodes(grp).forEach(n => {
+            n.mode = 0;
+            if (n.flags) n.flags.disabled = false;
+        });
+    }
 
     function isNodeActive(n) {
         return n.mode !== 4 && n.mode !== 2 && !n.flags?.disabled;
+    }
+
+
+    /* ═══════════════════ 组状态检测与外部同步 ═══════════════════ */
+
+
+    function getGroupState(grp) {
+        const nodes = collectNodes(grp);
+        if (nodes.length === 0) return true;
+        const allActive   = nodes.every(n => isNodeActive(n));
+        const allInactive = nodes.every(n => !isNodeActive(n));
+        if (allActive)   return true;
+        if (allInactive) return false;
+        return null;
+    }
+
+    /* 计算所有组状态签名（用于检测外部变化） */
+    function computeStateSig(list) {
+        return list.map(g => {
+            const s = getGroupState(g);
+            return g.title + ":" + (s === true ? "1" : s === false ? "0" : "m");
+        }).join("\x00");
+    }
+
+    /* 将外部操作引起的节点状态变化同步到 activeSet / active */
+    function syncExternalState() {
+        const list = visible();
+        let changed = false;
+
+        if (mode === "default") {
+            if (!Array.isArray(activeSet)) return;
+            list.forEach(g => {
+                const gs = getGroupState(g);
+                const isActive = activeSet.includes(g.title);
+                if (gs === true && !isActive) {
+                    /* 全部激活 → 开关打开 */
+                    activeSet.push(g.title);
+                    changed = true;
+                } else if (gs === false && isActive) {
+                    /* 全部绕过/禁用 → 开关关闭 */
+                    activeSet = activeSet.filter(t => t !== g.title);
+                    changed = true;
+                }
+                /* 混合状态 → 保持当前开关不变 */
+            });
+        } else if (mode === "at_most_one") {
+            /* at_most_one：仅处理"关闭"方向 */
+            if (active) {
+                const grp = list.find(g => g.title === active);
+                if (grp && getGroupState(grp) === false) {
+                    active = null;
+                    changed = true;
+                }
+            }
+        }
+        /* always_one：不做自动同步，避免违反"始终开启1个"约束 */
+
+        if (changed) save();
     }
 
 
@@ -196,7 +273,14 @@ function buildIgnoreGroupsUI(node) {
         return t + "…";
     }
 
-    /* 齿轮图标 */
+    function hexToRgba(hex, alpha) {
+        if (!hex || hex.length < 7) return `rgba(120,120,120,${alpha})`;
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r},${g},${b},${alpha})`;
+    }
+
     function drawGear(ctx, cx, cy, r) {
         const teeth  = 8;
         const outerR = r;
@@ -226,7 +310,6 @@ function buildIgnoreGroupsUI(node) {
         ctx.lineWidth = 1.2;
         ctx.stroke();
 
-        /* 中心孔 */
         ctx.beginPath();
         ctx.arc(cx, cy, holeR, 0, Math.PI * 2);
         ctx.fillStyle = "#2a2a2a";
@@ -240,6 +323,7 @@ function buildIgnoreGroupsUI(node) {
 
     /* ═══════════════════ 核心刷新 ═══════════════════ */
     let lastSig = "";
+    let lastStateSig = "";
 
     function refresh(forceApply) {
         const list = visible();
@@ -251,7 +335,16 @@ function buildIgnoreGroupsUI(node) {
 
         if (mode === "default") {
             if (!Array.isArray(activeSet)) {
-                activeSet = list.map(g => g.title);
+                /* 首次加载/复位时，根据每个组的实际节点状态来决定开关 */
+                activeSet = [];
+                list.forEach(g => {
+                    const gs = getGroupState(g);
+                    if (gs !== false) {
+
+                        activeSet.push(g.title);
+                    }
+  
+                });
                 stateChanged = true;
             } else {
                 const titles = new Set(list.map(g => g.title));
@@ -273,17 +366,22 @@ function buildIgnoreGroupsUI(node) {
         if (stateChanged) save();
 
         if (forceApply || stateChanged || listChanged) {
-            list.forEach(g => {
-                let isOn;
-                if (mode === "default") {
-                    isOn = activeSet.includes(g.title);
-                } else {
-                    isOn = (g.title === active);
-                }
-                if (isOn) restoreGroup(g);
-                else      bypassGroup(g);
-            });
-            try { app.graph.change(); } catch (_) { /* ignore */ }
+            selfChanging = true;
+            try {
+                list.forEach(g => {
+                    let isOn;
+                    if (mode === "default") {
+                        isOn = activeSet.includes(g.title);
+                    } else {
+                        isOn = (g.title === active);
+                    }
+                    if (isOn) restoreGroup(g);
+                    else      bypassGroup(g);
+                });
+                try { app.graph.change(); } catch (_) { /* ignore */ }
+            } finally {
+                selfChanging = false;
+            }
         }
     }
 
@@ -328,7 +426,7 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 设置弹窗 ═══════════════════ */
+    /* ═══════════════════ 选项设置 ═══════════════════ */
     function showSettings(x, y) {
         const old = document.getElementById("guhai_ig_pop");
         if (old) old.remove();
@@ -338,7 +436,7 @@ function buildIgnoreGroupsUI(node) {
         Object.assign(pop.style, {
             position: "fixed",
             left: Math.min(x, innerWidth  - 280) + "px",
-            top:  Math.min(y, innerHeight - 420) + "px",
+            top:  Math.min(y, innerHeight - 460) + "px",
             background: "#2a2a2a",
             border: "1px solid #555",
             borderRadius: "8px",
@@ -360,9 +458,53 @@ function buildIgnoreGroupsUI(node) {
         });
         pop.appendChild(titleEl);
 
-        /* ── 匹配标题关键词 ── */
+        /* ── 关闭方式（绕过 / 禁用）── */
+        const dLabel = document.createElement("div");
+        dLabel.textContent = "路由控制";
+        Object.assign(dLabel.style, {
+            fontSize: "13px", fontWeight: "bold", marginBottom: "6px",
+        });
+        pop.appendChild(dLabel);
+
+        const dRow = document.createElement("div");
+        Object.assign(dRow.style, {
+            display: "flex", alignItems: "center", gap: "20px",
+            marginBottom: "14px",
+        });
+
+        const dRadioBypass = document.createElement("input");
+        dRadioBypass.type = "radio";
+        dRadioBypass.name = "guhai_ig_close_mode";
+        dRadioBypass.value = "bypass";
+        dRadioBypass.checked = !igDisable;
+        dRadioBypass.style.cursor = "pointer";
+
+        const dLblBypass = document.createElement("label");
+        dLblBypass.style.cursor = "pointer";
+        dLblBypass.style.fontSize = "13px";
+        dLblBypass.appendChild(dRadioBypass);
+        dLblBypass.appendChild(document.createTextNode(" 绕过（ctrl+b）"));
+
+        const dRadioDisable = document.createElement("input");
+        dRadioDisable.type = "radio";
+        dRadioDisable.name = "guhai_ig_close_mode";
+        dRadioDisable.value = "disable";
+        dRadioDisable.checked = !!igDisable;
+        dRadioDisable.style.cursor = "pointer";
+
+        const dLblDisable = document.createElement("label");
+        dLblDisable.style.cursor = "pointer";
+        dLblDisable.style.fontSize = "13px";
+        dLblDisable.appendChild(dRadioDisable);
+        dLblDisable.appendChild(document.createTextNode(" 禁用（ctrl+m）"));
+
+        dRow.appendChild(dLblBypass);
+        dRow.appendChild(dLblDisable);
+        pop.appendChild(dRow);
+
+        /* ── 筛选关键词 ── */
         const fLabel = document.createElement("div");
-        fLabel.textContent = "匹配标题关键词";
+        fLabel.textContent = "筛选关键词";
         Object.assign(fLabel.style, {
             fontSize: "13px", fontWeight: "bold", marginBottom: "4px",
         });
@@ -408,9 +550,9 @@ function buildIgnoreGroupsUI(node) {
         mSelect.value = mode;
         pop.appendChild(mSelect);
 
-        /* ── 组名颜色 ── */
+        /* ── 主题颜色 ── */
         const cLabel = document.createElement("div");
-        cLabel.textContent = "组名颜色";
+        cLabel.textContent = "主题颜色";
         Object.assign(cLabel.style, {
             fontSize: "13px", fontWeight: "bold", marginBottom: "4px",
         });
@@ -424,7 +566,7 @@ function buildIgnoreGroupsUI(node) {
 
         const cInput = document.createElement("input");
         cInput.type = "color";
-        cInput.value = nameColor || "#e0e0e0";
+        cInput.value = nameColor || "#ac8686";
         Object.assign(cInput.style, {
             width: "36px", height: "28px", padding: "0",
             border: "1px solid #555", borderRadius: "4px",
@@ -434,7 +576,7 @@ function buildIgnoreGroupsUI(node) {
 
         const cHex = document.createElement("input");
         cHex.type = "text";
-        cHex.value = nameColor || "#e0e0e0";
+        cHex.value = nameColor || "#ac8686";
         Object.assign(cHex.style, {
             flex: "1", padding: "5px 8px", fontSize: "13px",
             background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
@@ -466,11 +608,12 @@ function buildIgnoreGroupsUI(node) {
             return btn;
         }
 
-        btnRow.appendChild(makeBtn("关闭", "#606060", () => pop.remove()));
+        btnRow.appendChild(makeBtn("取消", "#606060", () => pop.remove()));
         btnRow.appendChild(makeBtn("应用", "#4CAF50", () => {
             filter    = fInput.value;
             const newMode = mSelect.value;
             nameColor = cInput.value || null;
+            igDisable = dRadioDisable.checked;
 
             if (newMode !== mode) {
                 if (newMode === "default") {
@@ -530,7 +673,6 @@ function buildIgnoreGroupsUI(node) {
         });
     }
 
-    /* 暴露设置函数供右键菜单调用 */
     node._guhaiShowSettings = showSettings;
 
 
@@ -546,12 +688,10 @@ function buildIgnoreGroupsUI(node) {
             _w = widgetWidth;
             _y = y;
 
-            /* ── 齿轮图标（半径 5，宽高各 10 像素） ── */
             const gearCX = widgetWidth - 18;
             const gearCY = y + HEADER_H / 2;
             drawGear(ctx, gearCX, gearCY, 5);
 
-            /* ── 组列表 ── */
             const list = visible();
 
             if (!list.length) {
@@ -567,7 +707,7 @@ function buildIgnoreGroupsUI(node) {
                 return;
             }
 
-            const effectiveColor = nameColor || "#e0e0e0";
+            const effectiveColor = nameColor || "#ac8686";
 
             list.forEach((g, i) => {
                 const rowX = PAD_X;
@@ -588,15 +728,15 @@ function buildIgnoreGroupsUI(node) {
                 ctx.lineWidth = 1;
                 ctx.stroke();
 
-                /* 开关轨道 */
+                /* 开关轨道 —— 颜色由主题色控制 */
                 const tx = rowX + rowW - ROW_PAD_R - TOGGLE_W;
                 const ty = rowY + (ROW_H - TOGGLE_H) / 2;
 
                 ctx.save();
                 if (isOn) {
-                    ctx.shadowColor = "rgba(76,175,80,0.35)";
+                    ctx.shadowColor = hexToRgba(effectiveColor, 0.35);
                     ctx.shadowBlur = 10;
-                    ctx.fillStyle = "#4CAF50";
+                    ctx.fillStyle = effectiveColor;
                 } else {
                     ctx.shadowColor = "transparent";
                     ctx.shadowBlur = 0;
@@ -613,13 +753,13 @@ function buildIgnoreGroupsUI(node) {
                 ctx.save();
                 ctx.shadowColor = "rgba(0,0,0,0.3)";
                 ctx.shadowBlur = 4;
-                ctx.fillStyle = isOn ? "#ffffff" : "#999999";
+                ctx.fillStyle = isOn ? "rgb(230,230,230)" : "rgb(128,128,128)";
                 ctx.beginPath();
                 ctx.arc(kx, ky, KNOB_R, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.restore();
 
-                /* 标签文字 —— 开关关闭时标题不透明度变为 50% */
+                /* 标签文字 */
                 const textX = rowX + ROW_PAD_L;
                 const maxTextW = tx - textX - 10;
                 ctx.save();
@@ -643,11 +783,9 @@ function buildIgnoreGroupsUI(node) {
                 return false;
             }
 
-            /* pos 为节点局部坐标，转为 widget 内部坐标 */
             const localX = pos[0];
             const localY = pos[1] - _y;
 
-            /* ── 齿轮图标点击（检测半径 7，略大于绘制半径方便点击） ── */
             const gearCX = _w - 18;
             const gearCY = HEADER_H / 2;
             const gdx = localX - gearCX;
@@ -657,7 +795,6 @@ function buildIgnoreGroupsUI(node) {
                 return true;
             }
 
-            /* ── 整行点击开关 ── */
             const list = visible();
             for (let i = 0; i < list.length; i++) {
                 const rowX = PAD_X;
@@ -681,13 +818,31 @@ function buildIgnoreGroupsUI(node) {
     });
 
 
+    /* ═══════════════════ 脏标记系统 ═══════════════════ */
+    if (app.graph && typeof app.graph.change === "function") {
+        const origGraphChange = app.graph.change;
+        app.graph.change = function () {
+            if (!selfChanging) dirty = true;
+            return origGraphChange.apply(this, arguments);
+        };
+    }
+
+    function onKeyDown(e) {
+        if ((e.ctrlKey || e.metaKey) &&
+            (e.key === "m" || e.key === "b" || e.key === "M" || e.key === "B")) {
+            setTimeout(() => { dirty = true; }, 100);
+        }
+    }
+    document.addEventListener("keydown", onKeyDown);
+
+
     /* ═══════════════════ 定时同步 ═══════════════════ */
     let pageVisible = !document.hidden;
     function onVisibilityChange() {
         const nowVisible = !document.hidden;
         if (nowVisible && !pageVisible) {
             pageVisible = true;
-            refresh(true);
+            dirty = true;
         } else {
             pageVisible = nowVisible;
         }
@@ -698,87 +853,37 @@ function buildIgnoreGroupsUI(node) {
         if (!node.graph) {
             clearInterval(timer);
             document.removeEventListener("visibilitychange", onVisibilityChange);
+            document.removeEventListener("keydown", onKeyDown);
             return;
         }
 
-        if (!pageVisible) return;
+        if (!pageVisible || !dirty) return;
+        dirty = false;
 
         const list = visible();
-        let stateChanged = false;
-
-        if (mode === "default" && Array.isArray(activeSet)) {
-            const newSet = [];
-            list.forEach(g => {
-                const nodes = collectNodes(g);
-                if (nodes.length === 0) {
-                    if (activeSet.includes(g.title)) newSet.push(g.title);
-                    return;
-                }
-
-                const wasOn = activeSet.includes(g.title);
-                if (wasOn) {
-                    const anyActive = nodes.some(n => isNodeActive(n));
-                    if (anyActive) {
-                        newSet.push(g.title);
-                    }
-                } else {
-                    const allActive = nodes.every(n => isNodeActive(n));
-                    if (allActive) {
-                        newSet.push(g.title);
-                    }
-                }
-            });
-
-            const oldSorted = [...activeSet].sort().join("\x00");
-            const newSorted = [...newSet].sort().join("\x00");
-            if (oldSorted !== newSorted) {
-                activeSet = newSet;
-                stateChanged = true;
-            }
-        } else if (mode === "always_one" || mode === "at_most_one") {
-            let foundActive = null;
-
-            if (active) {
-                const currentGrp = list.find(g => g.title === active);
-                if (currentGrp) {
-                    const nodes = collectNodes(currentGrp);
-                    if (nodes.length === 0 || nodes.some(n => isNodeActive(n))) {
-                        foundActive = currentGrp.title;
-                    }
-                }
-            }
-
-            if (!foundActive) {
-                for (const g of list) {
-                    const nodes = collectNodes(g);
-                    if (nodes.length > 0 && nodes.every(n => isNodeActive(n))) {
-                        foundActive = g.title;
-                        break;
-                    }
-                }
-            }
-
-            if (mode === "always_one") {
-                if (!foundActive) {
-                    foundActive = list.length ? list[0].title : null;
-                }
-            }
-            if (foundActive !== active) {
-                active = foundActive;
-                stateChanged = true;
-            }
-        }
 
         const sig = list.map(g => g.title).join("\x00");
         const listChanged = (sig !== lastSig);
+        const stateSig = computeStateSig(list);
+        const stateChanged = (stateSig !== lastStateSig);
 
-        if (stateChanged) {
-            save();
-            refresh(true);
-        } else if (listChanged) {
-            refresh(false);
+        if (listChanged || stateChanged) {
+            lastStateSig = stateSig;
+
+            selfChanging = true;
+            try {
+                /* 同步外部状态变化到 activeSet / active */
+                syncExternalState();
+                /* 组列表变化时执行完整刷新（应用旁路/恢复） */
+                if (listChanged) {
+                    refresh(false);
+                }
+                try { app.graph.change(); } catch (_) {}
+            } finally {
+                selfChanging = false;
+            }
         }
-    }, 3000);
+    }, 500);
 
 
     /* ═══════════════════ 工作流加载后同步 ═══════════════════ */
@@ -788,11 +893,16 @@ function buildIgnoreGroupsUI(node) {
         active    = (node.properties && node.properties.guhai_ig_active)     || null;
         activeSet = (node.properties && node.properties.guhai_ig_active_set) || null;
         nameColor = (node.properties && node.properties.guhai_ig_name_color) || null;
+        igDisable = (node.properties && node.properties.guhai_ig_disable)    || false;
         lastSig = "";
+        lastStateSig = "";
+        dirty = true;
         refresh(true);
     };
 
 
     /* ═══════════════════ 初始构建 ═══════════════════ */
     refresh(false);
+    lastStateSig = computeStateSig(visible());
+    dirty = false;
 }
