@@ -9,6 +9,9 @@ app.registerExtension({
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
+            /* ── 首次创建 / 重置时设置默认颜色 ── */
+            if (!this.color)   this.color   = "#4E464A";
+            if (!this.bgcolor) this.bgcolor = "#4E464A";
             this.size = [400, this.size[1]];
             buildIgnoreGroupsUI(this);
         };
@@ -50,6 +53,9 @@ function buildIgnoreGroupsUI(node) {
     let igDisable = false;
     let selfChanging = false;
     let dirty         = true;
+    let sortOrder     = "position";
+    let colorFilter   = "none";
+    let prevVisibleTitles = new Set();   
 
     if (node.properties) {
         if (node.properties.guhai_ig_filter     != null) filter    = node.properties.guhai_ig_filter;
@@ -58,16 +64,20 @@ function buildIgnoreGroupsUI(node) {
         if (node.properties.guhai_ig_active_set != null) activeSet = node.properties.guhai_ig_active_set;
         if (node.properties.guhai_ig_name_color != null) nameColor = node.properties.guhai_ig_name_color;
         if (node.properties.guhai_ig_disable    != null) igDisable = !!node.properties.guhai_ig_disable;
+        if (node.properties.guhai_ig_sort_order  != null) sortOrder   = node.properties.guhai_ig_sort_order;
+        if (node.properties.guhai_ig_color_filter!= null) colorFilter = node.properties.guhai_ig_color_filter;
     }
 
     function save() {
         node.properties = node.properties || {};
-        node.properties.guhai_ig_filter     = filter;
-        node.properties.guhai_ig_mode       = mode;
-        node.properties.guhai_ig_active     = active;
-        node.properties.guhai_ig_active_set = activeSet;
-        node.properties.guhai_ig_name_color = nameColor;
-        node.properties.guhai_ig_disable    = igDisable;
+        node.properties.guhai_ig_filter      = filter;
+        node.properties.guhai_ig_mode        = mode;
+        node.properties.guhai_ig_active      = active;
+        node.properties.guhai_ig_active_set  = activeSet;
+        node.properties.guhai_ig_name_color  = nameColor;
+        node.properties.guhai_ig_disable     = igDisable;
+        node.properties.guhai_ig_sort_order  = sortOrder;
+        node.properties.guhai_ig_color_filter = colorFilter;
     }
 
 
@@ -91,8 +101,38 @@ function buildIgnoreGroupsUI(node) {
         return [p[0], p[1], s[0], s[1]];
     }
 
+    function getGroupColor(g) {
+        if (g.color) {
+            let c = g.color;
+            if (typeof c === "number") {
+                return "#" + c.toString(16).padStart(6, "0");
+            }
+            if (typeof c === "string" && c.startsWith("#") && (c.length === 4 || c.length === 7)) {
+                if (c.length === 4) {
+                    return "#" + c[1]+c[1] + c[2]+c[2] + c[3]+c[3];
+                }
+                return c;
+            }
+        }
+        return "";
+    }
+
     function nBounds(n) {
-        const p = n.pos || [0, 0], s = n.size || [100, 60];
+        const p = n.pos || [0, 0];
+        const s = n.size || [100, 60];
+
+        if (n.collapsed || n._collapsed) {
+            const titleH = (typeof LiteGraph !== "undefined" && LiteGraph.NODE_TITLE_HEIGHT) || 30;
+
+            let collapsedW = n._collapsed_width;
+            if (!collapsedW || collapsedW <= 0) {
+                const title = (typeof n.getTitle === "function" ? n.getTitle() : n.title) || "";
+                collapsedW = Math.max(80, title.length * 7 + 50);
+            }
+
+            return [p[0], p[1], collapsedW, titleH];
+        }
+
         return [p[0], p[1], s[0], s[1]];
     }
 
@@ -112,22 +152,45 @@ function buildIgnoreGroupsUI(node) {
     function rawGroups() {
         const g = app.graph;
         if (!g || !g._groups) return [];
-        return g._groups.map(gr => ({
-            title:  (gr.title || "").trim() || "Unnamed",
-            bounds: gBounds(gr),
-            ref:    gr,
-        }));
+        return g._groups.map(gr => {
+            const color = getGroupColor(gr);
+            return {
+                title:  (gr.title || "").trim() || "Unnamed",
+                bounds: gBounds(gr),
+                ref:    gr,
+                color:  color,
+            };
+        });
     }
 
     function visible() {
         let list = rawGroups();
+        /* 自动屏蔽空内容的组：过滤掉内部无任何节点的组 */
+        list = list.filter(g => collectNodes(g).length > 0);
         if (filter.trim()) {
             const kw = filter.trim().toLowerCase();
             list = list.filter(g => g.title.toLowerCase().includes(kw));
         }
-        list.sort((a, b) =>
-            a.title.localeCompare(b.title, undefined, { sensitivity: "base" })
-        );
+        if (colorFilter && colorFilter !== "none") {
+            list = list.filter(g => {
+                if (colorFilter === "__transparent__") {
+                    return !g.color;
+                }
+                return g.color && g.color.toLowerCase() === colorFilter.toLowerCase();
+            });
+        }
+        if (sortOrder === "position") {
+            list.sort((a, b) => {
+                const ax = a.bounds[0], ay = a.bounds[1];
+                const bx = b.bounds[0], by = b.bounds[1];
+                if (ay !== by) return ay - by;
+                return ax - bx;
+            });
+        } else {
+            list.sort((a, b) =>
+                a.title.localeCompare(b.title, undefined, { sensitivity: "base" })
+            );
+        }
         return list;
     }
 
@@ -207,7 +270,6 @@ function buildIgnoreGroupsUI(node) {
         return null;
     }
 
-    /* 计算所有组状态签名（用于检测外部变化） */
     function computeStateSig(list) {
         return list.map(g => {
             const s = getGroupState(g);
@@ -215,9 +277,9 @@ function buildIgnoreGroupsUI(node) {
         }).join("\x00");
     }
 
-    /* 将外部操作引起的节点状态变化同步到 activeSet / active */
     function syncExternalState() {
-        const list = visible();
+
+        const list = rawGroups();
         let changed = false;
 
         if (mode === "default") {
@@ -226,18 +288,14 @@ function buildIgnoreGroupsUI(node) {
                 const gs = getGroupState(g);
                 const isActive = activeSet.includes(g.title);
                 if (gs === true && !isActive) {
-                    /* 全部激活 → 开关打开 */
                     activeSet.push(g.title);
                     changed = true;
                 } else if (gs === false && isActive) {
-                    /* 全部绕过/禁用 → 开关关闭 */
                     activeSet = activeSet.filter(t => t !== g.title);
                     changed = true;
                 }
-                /* 混合状态 → 保持当前开关不变 */
             });
         } else if (mode === "at_most_one") {
-            /* at_most_one：仅处理"关闭"方向 */
             if (active) {
                 const grp = list.find(g => g.title === active);
                 if (grp && getGroupState(grp) === false) {
@@ -246,7 +304,6 @@ function buildIgnoreGroupsUI(node) {
                 }
             }
         }
-        /* always_one：不做自动同步，避免违反"始终开启1个"约束 */
 
         if (changed) save();
     }
@@ -327,6 +384,7 @@ function buildIgnoreGroupsUI(node) {
 
     function refresh(forceApply) {
         const list = visible();
+        const currentVisibleTitles = new Set(list.map(g => g.title));
         const sig  = list.map(g => g.title).join("\x00");
         const listChanged = (sig !== lastSig);
         lastSig = sig;
@@ -335,30 +393,49 @@ function buildIgnoreGroupsUI(node) {
 
         if (mode === "default") {
             if (!Array.isArray(activeSet)) {
-                /* 首次加载/复位时，根据每个组的实际节点状态来决定开关 */
                 activeSet = [];
-                list.forEach(g => {
+
+                rawGroups().forEach(g => {
                     const gs = getGroupState(g);
                     if (gs !== false) {
-
                         activeSet.push(g.title);
                     }
-  
                 });
                 stateChanged = true;
             } else {
-                const titles = new Set(list.map(g => g.title));
+ 
+                const allTitles = new Set(rawGroups().map(g => g.title));
                 const before = activeSet.length;
-                activeSet = activeSet.filter(t => titles.has(t));
+                activeSet = activeSet.filter(t => allTitles.has(t));
                 if (activeSet.length !== before) stateChanged = true;
+
+
+                if (listChanged) {
+                    list.forEach(g => {
+                        if (!prevVisibleTitles.has(g.title)) {
+                            const gs = getGroupState(g);
+                            const idx = activeSet.indexOf(g.title);
+                            if (gs === true && idx < 0) {
+                                activeSet.push(g.title);
+                                stateChanged = true;
+                            } else if (gs === false && idx >= 0) {
+                                activeSet.splice(idx, 1);
+                                stateChanged = true;
+                            }
+
+                        }
+                    });
+                }
             }
         } else {
-            if (active && !list.find(g => g.title === active)) {
-                active = (mode === "always_one" && list.length) ? list[0].title : null;
+  
+            const allGroupsList = rawGroups();
+            if (active && !allGroupsList.find(g => g.title === active)) {
+                active = (mode === "always_one" && allGroupsList.length) ? allGroupsList[0].title : null;
                 stateChanged = true;
             }
-            if (mode === "always_one" && !active && list.length) {
-                active = list[0].title;
+            if (mode === "always_one" && !active && allGroupsList.length) {
+                active = allGroupsList[0].title;
                 stateChanged = true;
             }
         }
@@ -383,6 +460,9 @@ function buildIgnoreGroupsUI(node) {
                 selfChanging = false;
             }
         }
+
+
+        prevVisibleTitles = currentVisibleTitles;
     }
 
 
@@ -426,17 +506,33 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 选项设置 ═══════════════════ */
+    /* ═══════════════════ 选项设置═══════════════════ */
+
+    /* 跟踪当前弹窗的清理函数，确保重复打开时先关闭旧的 */
+    let _settingsCleanup = null;
+
     function showSettings(x, y) {
-        const old = document.getElementById("guhai_ig_pop");
-        if (old) old.remove();
+        /* 清理上一次弹窗（如果仍存在） */
+        if (_settingsCleanup) { _settingsCleanup(); _settingsCleanup = null; }
+
+        /* ── 全屏透明遮罩── */
+        const overlay = document.createElement("div");
+        overlay.id = "guhai_ig_overlay";
+        Object.assign(overlay.style, {
+            position: "fixed",
+            inset: "0",
+            zIndex: "99998",
+            background: "transparent",
+            cursor: "default",
+        });
+        document.body.appendChild(overlay);
 
         const pop = document.createElement("div");
         pop.id = "guhai_ig_pop";
         Object.assign(pop.style, {
             position: "fixed",
             left: Math.min(x, innerWidth  - 280) + "px",
-            top:  Math.min(y, innerHeight - 460) + "px",
+            top:  Math.min(y, innerHeight - 560) + "px",
             background: "#2a2a2a",
             border: "1px solid #555",
             borderRadius: "8px",
@@ -447,6 +543,78 @@ function buildIgnoreGroupsUI(node) {
             color: "#e0e0e0",
             fontFamily: "inherit",
         });
+
+        /* ── 统一关闭函数 ── */
+        function closePopup() {
+            if (overlay.parentNode) overlay.remove();
+            if (pop.parentNode)     pop.remove();
+            document.removeEventListener("keydown", onEsc);
+            document.removeEventListener("mousedown", closeColorPanel);
+            _settingsCleanup = null;
+        }
+
+        _settingsCleanup = closePopup;
+
+        /* 遮罩层点击 → 关闭 */
+        overlay.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closePopup();
+        });
+
+        /* Escape 键 → 关闭 */
+        function onEsc(e) {
+            if (e.key === "Escape") closePopup();
+        }
+        document.addEventListener("keydown", onEsc);
+
+
+        /* ── 实时应用函数 ── */
+        function applyAll() {
+            filter      = fInput.value;
+            colorFilter = cFilter;
+            nameColor   = cInput.value || null;
+            igDisable   = dRadioDisable.checked;
+            sortOrder   = sSelect.value;
+
+            const newMode = mSelect.value;
+
+            if (newMode !== mode) {
+                if (newMode === "default") {
+                    activeSet = visible().map(g => g.title);
+                } else if (newMode === "always_one") {
+                    const list = visible();
+                    if (activeSet && activeSet.length) {
+                        active = activeSet[0];
+                    } else if (list.length) {
+                        active = list[0].title;
+                    } else {
+                        active = null;
+                    }
+                    activeSet = null;
+                } else {
+                    const list = visible();
+                    if (activeSet && activeSet.length) {
+                        active = activeSet[0];
+                    } else if (mode === "always_one" && active) {
+                        /* keep */
+                    } else {
+                        active = null;
+                    }
+                    activeSet = null;
+                }
+                mode = newMode;
+            } else {
+                mode = newMode;
+                if (mode === "always_one" && !active) {
+                    const list = visible();
+                    if (list.length) active = list[0].title;
+                }
+            }
+
+            save();
+            refresh(true);
+        }
 
         /* ── 标题 ── */
         const titleEl = document.createElement("div");
@@ -502,9 +670,12 @@ function buildIgnoreGroupsUI(node) {
         dRow.appendChild(dLblDisable);
         pop.appendChild(dRow);
 
-        /* ── 筛选关键词 ── */
+        dRadioBypass.addEventListener("change", applyAll);
+        dRadioDisable.addEventListener("change", applyAll);
+
+        /* ── 关键词筛选 ── */
         const fLabel = document.createElement("div");
-        fLabel.textContent = "筛选关键词";
+        fLabel.textContent = "关键词筛选";
         Object.assign(fLabel.style, {
             fontSize: "13px", fontWeight: "bold", marginBottom: "4px",
         });
@@ -521,6 +692,166 @@ function buildIgnoreGroupsUI(node) {
             marginBottom: "14px",
         });
         pop.appendChild(fInput);
+
+        let filterTimer = null;
+        fInput.addEventListener("input", () => {
+            if (filterTimer) clearTimeout(filterTimer);
+            filterTimer = setTimeout(applyAll, 200);
+        });
+
+        /* ── 颜色筛选 ── */
+        const cLabel = document.createElement("div");
+        cLabel.textContent = "颜色筛选";
+        Object.assign(cLabel.style, {
+            fontSize: "13px", fontWeight: "bold", marginBottom: "4px",
+        });
+        pop.appendChild(cLabel);
+
+        let cFilter = colorFilter || "none";
+
+        const cdContainer = document.createElement("div");
+        Object.assign(cdContainer.style, {
+            position: "relative", width: "100%",
+            marginBottom: "14px",
+        });
+
+        const cdTrigger = document.createElement("div");
+        Object.assign(cdTrigger.style, {
+            width: "100%", padding: "5px 8px", fontSize: "13px",
+            background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
+            color: "#e0e0e0", boxSizing: "border-box",
+            cursor: "pointer", display: "flex", alignItems: "center", gap: "6px",
+            userSelect: "none",
+        });
+
+        const cdColorRect = document.createElement("span");
+        Object.assign(cdColorRect.style, {
+            display: "inline-block", width: "44px", height: "14px",
+            borderRadius: "2px", border: "1px solid #555", flexShrink: "0",
+        });
+
+        const cdColorText = document.createElement("span");
+        Object.assign(cdColorText.style, { flex: "1" });
+
+        const cdArrow = document.createElement("span");
+        cdArrow.textContent = "\u25BE";
+        Object.assign(cdArrow.style, { marginLeft: "auto", fontSize: "11px", color: "#888" });
+
+        cdTrigger.appendChild(cdColorRect);
+        cdTrigger.appendChild(cdColorText);
+        cdTrigger.appendChild(cdArrow);
+
+        function updateColorPreview() {
+            if (cFilter === "none") {
+                cdColorRect.style.display = "none";
+                cdColorText.textContent = "无";
+            } else if (cFilter === "__transparent__") {
+                cdColorRect.style.display = "inline-block";
+                cdColorRect.style.background = "transparent";
+                cdColorRect.textContent = "";
+                cdColorText.textContent = "透明色";
+            } else {
+                cdColorRect.style.display = "inline-block";
+                cdColorRect.style.background = cFilter;
+                cdColorRect.textContent = "";
+                cdColorText.textContent = cFilter.toUpperCase();
+            }
+        }
+        updateColorPreview();
+
+        cdContainer.appendChild(cdTrigger);
+
+        let cdPanel = null;
+
+        function buildColorOptions() {
+            const allRaw = rawGroups();
+            const colorMap = new Map();
+            allRaw.forEach(g => {
+                const c = g.color || "__transparent__";
+                if (!colorMap.has(c)) colorMap.set(c, g);
+            });
+
+            const colors = Array.from(colorMap.keys());
+
+            if (cdPanel) { cdPanel.remove(); cdPanel = null; }
+
+            cdPanel = document.createElement("div");
+            Object.assign(cdPanel.style, {
+                position: "absolute", left: "0", right: "0", top: "calc(100% + 2px)",
+                background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
+                zIndex: "100001", maxHeight: "200px", overflowY: "auto",
+                boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+            });
+
+            function makeColorItem(bgColor, label, value, isTransparent, isNone) {
+                const item = document.createElement("div");
+                Object.assign(item.style, {
+                    display: "flex", alignItems: "center", gap: "8px",
+                    padding: "5px 8px", cursor: "pointer", fontSize: "13px",
+                    transition: "background 0.15s",
+                });
+                item.addEventListener("mouseenter", () => { item.style.background = "#3a3a3a"; });
+                item.addEventListener("mouseleave", () => { item.style.background = "transparent"; });
+
+                if (!isNone) {
+                    const rect = document.createElement("span");
+                    Object.assign(rect.style, {
+                        display: "inline-block", width: "44px", height: "16px",
+                        borderRadius: "2px", border: "1px solid #555",
+                        background: isTransparent ? "transparent" : bgColor,
+                        flexShrink: "0",
+                    });
+                    item.appendChild(rect);
+                }
+
+                const txt = document.createElement("span");
+                txt.textContent = label;
+                txt.style.color = "#fff";
+                item.appendChild(txt);
+
+                item.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    cFilter = value;
+                    updateColorPreview();
+                    if (cdPanel) { cdPanel.remove(); cdPanel = null; }
+                    applyAll();
+                });
+
+                return item;
+            }
+
+            cdPanel.appendChild(makeColorItem("#2a2a2a", "无", "none", false, true));
+
+            colors.forEach(c => {
+                if (c === "__transparent__") {
+                    cdPanel.appendChild(makeColorItem("#2A2A2A", "透明色", "__transparent__", true, false));
+                } else {
+                    cdPanel.appendChild(makeColorItem(c, c.toUpperCase(), c, false, false));
+                }
+            });
+
+            cdContainer.appendChild(cdPanel);
+        }
+
+        cdTrigger.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (cdPanel) {
+                cdPanel.remove();
+                cdPanel = null;
+            } else {
+                buildColorOptions();
+            }
+        });
+
+        pop.appendChild(cdContainer);
+
+        const closeColorPanel = (e) => {
+            if (cdPanel && !cdContainer.contains(e.target)) {
+                cdPanel.remove();
+                cdPanel = null;
+            }
+        };
+        document.addEventListener("mousedown", closeColorPanel);
 
         /* ── 切换模式 ── */
         const mLabel = document.createElement("div");
@@ -550,13 +881,44 @@ function buildIgnoreGroupsUI(node) {
         mSelect.value = mode;
         pop.appendChild(mSelect);
 
-        /* ── 主题颜色 ── */
-        const cLabel = document.createElement("div");
-        cLabel.textContent = "主题颜色";
-        Object.assign(cLabel.style, {
+        mSelect.addEventListener("change", applyAll);
+
+        /* ── 排序── */
+        const sLabel = document.createElement("div");
+        sLabel.textContent = "排序";
+        Object.assign(sLabel.style, {
             fontSize: "13px", fontWeight: "bold", marginBottom: "4px",
         });
-        pop.appendChild(cLabel);
+        pop.appendChild(sLabel);
+
+        const sSelect = document.createElement("select");
+        Object.assign(sSelect.style, {
+            width: "100%", padding: "5px 8px", fontSize: "13px",
+            background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
+            color: "#e0e0e0", outline: "none", boxSizing: "border-box",
+            marginBottom: "14px",
+        });
+        [
+            ["position", "按位置"],
+            ["alphabet", "按首字母"],
+        ].forEach(([val, txt]) => {
+            const opt = document.createElement("option");
+            opt.value = val;
+            opt.textContent = txt;
+            sSelect.appendChild(opt);
+        });
+        sSelect.value = sortOrder;
+        pop.appendChild(sSelect);
+
+        sSelect.addEventListener("change", applyAll);
+
+        /* ── 主题颜色 ── */
+        const tcLabel = document.createElement("div");
+        tcLabel.textContent = "主题颜色";
+        Object.assign(tcLabel.style, {
+            fontSize: "13px", fontWeight: "bold", marginBottom: "4px",
+        });
+        pop.appendChild(tcLabel);
 
         const colorRow = document.createElement("div");
         Object.assign(colorRow.style, {
@@ -584,88 +946,21 @@ function buildIgnoreGroupsUI(node) {
         });
         colorRow.appendChild(cHex);
 
-        cInput.addEventListener("input", () => { cHex.value = cInput.value; });
+        cInput.addEventListener("input", () => {
+            cHex.value = cInput.value;
+            applyAll();
+        });
         cHex.addEventListener("input", () => {
-            if (/^#[0-9a-fA-F]{6}$/.test(cHex.value)) cInput.value = cHex.value;
+            if (/^#[0-9a-fA-F]{6}$/.test(cHex.value)) {
+                cInput.value = cHex.value;
+                applyAll();
+            }
         });
         pop.appendChild(colorRow);
 
-        /* ── 按钮 ── */
-        const btnRow = document.createElement("div");
-        Object.assign(btnRow.style, {
-            display: "flex", justifyContent: "flex-end", gap: "8px",
-        });
-
-        function makeBtn(text, bg, onClick) {
-            const btn = document.createElement("button");
-            btn.textContent = text;
-            Object.assign(btn.style, {
-                padding: "6px 22px", fontSize: "15.6px", background: bg,
-                border: "none", borderRadius: "4px", color: "#fff",
-                cursor: "pointer",
-            });
-            btn.addEventListener("click", onClick);
-            return btn;
-        }
-
-        btnRow.appendChild(makeBtn("取消", "#606060", () => pop.remove()));
-        btnRow.appendChild(makeBtn("应用", "#4CAF50", () => {
-            filter    = fInput.value;
-            const newMode = mSelect.value;
-            nameColor = cInput.value || null;
-            igDisable = dRadioDisable.checked;
-
-            if (newMode !== mode) {
-                if (newMode === "default") {
-                    activeSet = visible().map(g => g.title);
-                } else if (newMode === "always_one") {
-                    const list = visible();
-                    if (activeSet && activeSet.length) {
-                        active = activeSet[0];
-                    } else if (list.length) {
-                        active = list[0].title;
-                    } else {
-                        active = null;
-                    }
-                    activeSet = null;
-                } else {
-                    const list = visible();
-                    if (activeSet && activeSet.length) {
-                        active = activeSet[0];
-                    } else if (mode === "always_one" && active) {
-                        /* keep */
-                    } else {
-                        active = null;
-                    }
-                    activeSet = null;
-                }
-                mode = newMode;
-            } else {
-                mode = newMode;
-                if (mode === "always_one" && !active) {
-                    const list = visible();
-                    if (list.length) active = list[0].title;
-                }
-            }
-
-            save();
-            refresh(true);
-            pop.remove();
-        }));
-        pop.appendChild(btnRow);
-
+        /* ── 挂载弹窗 ── */
         document.body.appendChild(pop);
         fInput.focus();
-
-        setTimeout(() => {
-            const handler = (e) => {
-                if (!pop.contains(e.target)) {
-                    pop.remove();
-                    document.removeEventListener("mousedown", handler);
-                }
-            };
-            document.addEventListener("mousedown", handler);
-        }, 50);
 
         pop.addEventListener("contextmenu", (e) => {
             e.preventDefault();
@@ -700,7 +995,7 @@ function buildIgnoreGroupsUI(node) {
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
                 ctx.fillText(
-                    filter.trim() ? "无匹配的组" : "工作流中无编组",
+                    filter.trim() ? "无匹配的组" : "工作流中无编组或空的编组",
                     widgetWidth / 2,
                     y + HEADER_H + 20
                 );
@@ -728,7 +1023,7 @@ function buildIgnoreGroupsUI(node) {
                 ctx.lineWidth = 1;
                 ctx.stroke();
 
-                /* 开关轨道 —— 颜色由主题色控制 */
+                /* 开关轨道 */
                 const tx = rowX + rowW - ROW_PAD_R - TOGGLE_W;
                 const ty = rowY + (ROW_H - TOGGLE_H) / 2;
 
@@ -872,9 +1167,7 @@ function buildIgnoreGroupsUI(node) {
 
             selfChanging = true;
             try {
-                /* 同步外部状态变化到 activeSet / active */
                 syncExternalState();
-                /* 组列表变化时执行完整刷新（应用旁路/恢复） */
                 if (listChanged) {
                     refresh(false);
                 }
@@ -888,14 +1181,17 @@ function buildIgnoreGroupsUI(node) {
 
     /* ═══════════════════ 工作流加载后同步 ═══════════════════ */
     node._guhaiSyncGroups = () => {
-        filter    = (node.properties && node.properties.guhai_ig_filter)     || "";
-        mode      = (node.properties && node.properties.guhai_ig_mode)       || "default";
-        active    = (node.properties && node.properties.guhai_ig_active)     || null;
-        activeSet = (node.properties && node.properties.guhai_ig_active_set) || null;
-        nameColor = (node.properties && node.properties.guhai_ig_name_color) || null;
-        igDisable = (node.properties && node.properties.guhai_ig_disable)    || false;
+        filter     = (node.properties && node.properties.guhai_ig_filter)      || "";
+        mode       = (node.properties && node.properties.guhai_ig_mode)        || "default";
+        active     = (node.properties && node.properties.guhai_ig_active)      || null;
+        activeSet  = (node.properties && node.properties.guhai_ig_active_set)  || null;
+        nameColor  = (node.properties && node.properties.guhai_ig_name_color)  || null;
+        igDisable  = (node.properties && node.properties.guhai_ig_disable)     || false;
+        sortOrder  = (node.properties && node.properties.guhai_ig_sort_order)  || "position";
+        colorFilter= (node.properties && node.properties.guhai_ig_color_filter)|| "none";
         lastSig = "";
         lastStateSig = "";
+        prevVisibleTitles = new Set();  
         dirty = true;
         refresh(true);
     };
