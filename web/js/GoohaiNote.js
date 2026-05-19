@@ -1,15 +1,7 @@
-/**
- * 孤海注释 - ComfyUI 自定义文本编辑器节点 *
- */
-
 import { app } from "../../../scripts/app.js";
 
-// ==================== 模块级工具常量与函数 ====================
-
-// URL 安全字符集（RFC 3986 + 常见字符）
 const _URL_CHARS = "a-zA-Z0-9._~:/?#\\[\\]@!$&'()*+,;=%\\-";
 
-// 链接匹配正则
 const LINK_REGEX = new RegExp(
     "(\\[\\[(.+?)\\]\\])" +
     "|(https?:\\/\\/[" + _URL_CHARS + "]+)" +
@@ -32,8 +24,6 @@ const LINE_START_FORBIDDEN = new Set([
     '\u201D', '\u2019', '」', '』',
 ]);
 const isLineStartForbidden = (ch) => LINE_START_FORBIDDEN.has(ch);
-
-// ==================== ComfyUI 字体获取（TTL 缓存） ====================
 
 let _cachedComfyFont = null;
 let _cachedFontTime = 0;
@@ -77,11 +67,6 @@ function getComfyUIFont() {
     return _cachedComfyFont;
 }
 
-// ==================== 链接解析与字符级换行 ====================
-
-/**
- * 将文本解析为语义段落数组
- */
 function parseSegments(text) {
     LINK_REGEX.lastIndex = 0;
     const segments = [];
@@ -90,7 +75,6 @@ function parseSegments(text) {
         if (match.index > last)
             segments.push({ type: 'text', content: text.substring(last, match.index), url: null });
         if (match[1] !== undefined) {
-            // [[链接]] 语法
             segments.push({ type: 'link', content: match[2], url: match[2] });
         } else if (match[3] !== undefined) {
             segments.push({ type: 'link', content: match[3], url: match[3] });
@@ -104,10 +88,6 @@ function parseSegments(text) {
     return segments;
 }
 
-/**
- * 将语义段落展开为带类型标记的字符数组
- * 每个元素: { ch, type: 'text'|'link', url: string|null }
- */
 function buildCharList(segments) {
     const list = [];
     for (const seg of segments) {
@@ -118,9 +98,6 @@ function buildCharList(segments) {
     return list;
 }
 
-/**
- * 对带类型标记的字符数组执行自动换行
- */
 function wrapCharList(ctx, charList, maxWidth) {
     if (!charList || charList.length === 0) return [[]];
 
@@ -188,7 +165,6 @@ function wrapCharList(ctx, charList, maxWidth) {
                 }
             }
 
-            // 行首禁排字符
             let fix = 0;
             while (fix++ < 20 && line.length > 0 && isLineStartForbidden(line[0].ch) && lines.length > 0) {
                 const prev = lines[lines.length - 1];
@@ -219,8 +195,6 @@ function wrapCharList(ctx, charList, maxWidth) {
     if (line.length > 0) lines.push(line);
     return lines.length > 0 ? lines : [[]];
 }
-
-// ==================== 基础节点类 ====================
 
 class TextEditorBaseNode extends LGraphNode {
     constructor(title) {
@@ -259,8 +233,6 @@ class TextEditorBaseNode extends LGraphNode {
     }
 }
 
-// ==================== 文本编辑器节点 ====================
-
 class TextEditorNode extends TextEditorBaseNode {
 
     constructor(title) {
@@ -270,13 +242,14 @@ class TextEditorNode extends TextEditorBaseNode {
         this.properties = {
             text: "双击编辑文本内容...",
             fontSize: 24,
-            fontColor: "#E3E3E3",
+            fontColor: "#C8C8C8",
             backgroundColor: "#1B4669",
-            backgroundAlpha: 0.6,
-            borderRadius: 30,
+            backgroundAlpha: 0.25,
+            borderRadius: 20,
             padding: 12,
             lineHeight: 1.4,
-            textAlign: "center"
+            textAlign: "center",
+            stroke: true
         };
         this.resizable = true;
         this.size = [360, 100];
@@ -287,11 +260,8 @@ class TextEditorNode extends TextEditorBaseNode {
         this.linkAreas = [];
     }
 
-    /* ---------- 字符级多行文本绘制 ---------- */
-
     drawMultilineText(ctx, text, maxWidth, lineHeight) {
         this.linkAreas = [];
-
 
         const processed = text
             .replace(/\\n/g, "\n")
@@ -313,7 +283,6 @@ class TextEditorNode extends TextEditorBaseNode {
             if (lineChars.length === 0) continue;
             const y = startY + idx * lineHeight;
 
-
             const groups = [];
             let gi = 0;
             while (gi < lineChars.length) {
@@ -327,7 +296,6 @@ class TextEditorNode extends TextEditorBaseNode {
                 gi = gj;
             }
 
-            // 计算行起始 x（根据对齐方式）
             const totalW = groups.reduce((s, g) => s + ctx.measureText(g.text).width, 0);
             let startX;
             if (this.properties.textAlign === "left") {
@@ -347,7 +315,6 @@ class TextEditorNode extends TextEditorBaseNode {
                     this.linkAreas.push({ x: dx, y, width: w, height: lineHeight, url: g.url });
                     ctx.fillStyle = "#1976D2";
                     ctx.fillText(g.text, dx, y);
-                    // 下划线
                     const uy = y + this.properties.fontSize;
                     ctx.beginPath();
                     ctx.moveTo(dx, uy + 1);
@@ -364,8 +331,6 @@ class TextEditorNode extends TextEditorBaseNode {
         }
     }
 
-    /* ---------- 编辑器管理 ---------- */
-
     createTextEditor() {
         if (this.editTextarea) this.removeTextEditor();
 
@@ -376,9 +341,8 @@ class TextEditorNode extends TextEditorBaseNode {
         const ox = (this.pos[0] + canvas.ds.offset[0]) * canvas.ds.scale;
         const oy = (this.pos[1] + canvas.ds.offset[1]) * canvas.ds.scale;
 
-        const TOOLBAR_OFFSET = 190;
+        const TOOLBAR_OFFSET = 210;
 
-        // ---- 工具栏 ----
         this.editToolbar = document.createElement("div");
         Object.assign(this.editToolbar.style, {
             position: "absolute",
@@ -388,7 +352,6 @@ class TextEditorNode extends TextEditorBaseNode {
             gap: "8px", zIndex: "1001", fontSize: "12px", color: "#ffffff"
         });
 
-        // ---- 对齐 ----
         const alignRow = document.createElement("div");
         Object.assign(alignRow.style, { display: "flex", alignItems: "center", gap: "8px" });
         const alignLabel = document.createElement("span");
@@ -419,9 +382,42 @@ class TextEditorNode extends TextEditorBaseNode {
             this.alignButtons[opt.key] = btn;
             alignRow.appendChild(btn);
         });
+
+        const strokeCtrl = document.createElement("div");
+        Object.assign(strokeCtrl.style, {
+            display: "flex", alignItems: "center", gap: "4px",
+            marginLeft: "auto",
+            marginRight: "2px"
+        });
+
+        this.strokeCheckbox = document.createElement("input");
+        this.strokeCheckbox.type = "checkbox";
+        this.strokeCheckbox.checked = !!this.properties.stroke;
+        Object.assign(this.strokeCheckbox.style, {
+            width: "19.5px",
+            height: "19.5px",
+            cursor: "pointer",
+            accentColor: "#459BAC"
+        });
+        this.strokeCheckbox.addEventListener("change", (e) => {
+            this.properties.stroke = e.target.checked;
+            app.graph.setDirtyCanvas(true);
+        });
+        strokeCtrl.appendChild(this.strokeCheckbox);
+
+        const strokeLabel = document.createElement("span");
+        strokeLabel.textContent = "：描边";
+        Object.assign(strokeLabel.style, { fontSize: "13px", userSelect: "none", cursor: "pointer" });
+        strokeLabel.addEventListener("click", () => {
+            this.strokeCheckbox.checked = !this.strokeCheckbox.checked;
+            this.properties.stroke = this.strokeCheckbox.checked;
+            app.graph.setDirtyCanvas(true);
+        });
+        strokeCtrl.appendChild(strokeLabel);
+
+        alignRow.appendChild(strokeCtrl);
         this.editToolbar.appendChild(alignRow);
 
-        // ---- 文本（颜色）+ 大小（滑条） ----
         const textRow = document.createElement("div");
         Object.assign(textRow.style, { display: "flex", alignItems: "center", gap: "8px" });
 
@@ -471,7 +467,6 @@ class TextEditorNode extends TextEditorBaseNode {
         textRow.appendChild(this.fontSizeValue);
         this.editToolbar.appendChild(textRow);
 
-        // ---- 背景（颜色）+ 透明（滑条） ----
         const bgRow = document.createElement("div");
         Object.assign(bgRow.style, { display: "flex", alignItems: "center", gap: "8px" });
 
@@ -522,7 +517,6 @@ class TextEditorNode extends TextEditorBaseNode {
         bgRow.appendChild(this.alphaValue);
         this.editToolbar.appendChild(bgRow);
 
-        // ---- 圆角 ----
         const radiusRow = document.createElement("div");
         Object.assign(radiusRow.style, { display: "flex", alignItems: "center", gap: "8px" });
         const radiusLbl = document.createElement("span");
@@ -550,7 +544,6 @@ class TextEditorNode extends TextEditorBaseNode {
         radiusRow.appendChild(this.borderRadiusValue);
         this.editToolbar.appendChild(radiusRow);
 
-        // ---- 行距 ----
         const lhRow = document.createElement("div");
         Object.assign(lhRow.style, { display: "flex", alignItems: "center", gap: "8px" });
         const lhLbl = document.createElement("span");
@@ -581,7 +574,6 @@ class TextEditorNode extends TextEditorBaseNode {
 
         document.body.appendChild(this.editToolbar);
 
-        // ---- 文本编辑区 ----
         this.editTextarea = document.createElement("textarea");
         this.editTextarea.value = this.properties.text;
         Object.assign(this.editTextarea.style, {
@@ -600,7 +592,6 @@ class TextEditorNode extends TextEditorBaseNode {
         this.editTextarea.focus();
         this.editTextarea.select();
 
-        // 保存并关闭
         const saveAndClose = () => {
             this.properties.text = this.editTextarea.value;
             this.removeTextEditor();
@@ -608,7 +599,6 @@ class TextEditorNode extends TextEditorBaseNode {
             app.graph.setDirtyCanvas(true);
         };
 
-        // 位置同步
         this.updateEditorsPosition = () => {
             if (!this.editTextarea || !this.editToolbar) return;
             const c = LGraphCanvas.active_canvas;
@@ -635,7 +625,6 @@ class TextEditorNode extends TextEditorBaseNode {
         };
         this.canvasUpdateInterval = setInterval(() => this.updateEditorsPosition(), 16);
 
-        // 键盘事件
         this.editTextarea.addEventListener("keydown", (e) => {
             if ("Escape" === e.key) {
                 this.removeTextEditor();
@@ -645,7 +634,6 @@ class TextEditorNode extends TextEditorBaseNode {
             e.stopPropagation();
         });
 
-        // 点击外部自动保存
         this.clickCount = 0;
         this.documentClickHandler = (e) => {
             this.clickCount++;
@@ -662,7 +650,6 @@ class TextEditorNode extends TextEditorBaseNode {
             if (this.isEditing) document.addEventListener("click", this.documentClickHandler, true);
         }, 200);
 
-        // 失去焦点
         this.editTextarea.addEventListener("blur", () => {
             setTimeout(() => {
                 if (this.editToolbar && this.editTextarea &&
@@ -705,19 +692,33 @@ class TextEditorNode extends TextEditorBaseNode {
         this.isEditing = false;
     }
 
-    /* ---------- 渲染 ---------- */
-
     onDrawBackground(ctx) {
         ctx.save();
         ctx.imageSmoothingEnabled = true;
 
         const r = this.properties.borderRadius;
+
         ctx.beginPath();
         ctx.roundRect(0, 0, this.size[0], this.size[1], r);
         ctx.fillStyle = this.hexToRGBA(this.properties.backgroundColor, this.properties.backgroundAlpha);
         ctx.fill();
 
+        if (this.properties.stroke) {
+            const bgHex = this.properties.backgroundColor;
+            const sr = Math.min(parseInt(bgHex.slice(1, 3), 16) + 80, 255);
+            const sg = Math.min(parseInt(bgHex.slice(3, 5), 16) + 80, 255);
+            const sb = Math.min(parseInt(bgHex.slice(5, 7), 16) + 80, 255);
+
+            ctx.beginPath();
+            ctx.roundRect(0.5, 0.5, this.size[0] - 1, this.size[1] - 1, Math.max(r - 0.5, 0));
+            ctx.strokeStyle = "rgba(" + sr + "," + sg + "," + sb + "," + this.properties.backgroundAlpha + ")";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
         if (this.isEditing) {
+            ctx.beginPath();
+            ctx.roundRect(0, 0, this.size[0], this.size[1], r);
             ctx.strokeStyle = "#4CAF50";
             ctx.lineWidth = 2;
             ctx.stroke();
@@ -748,8 +749,6 @@ class TextEditorNode extends TextEditorBaseNode {
         this.onDrawBackground(ctx);
     }
 
-    /* ---------- 属性变更 ---------- */
-
     onPropertyChanged(name, value) {
         if (this.isEditing) {
             if ("fontSize" === name && this.fontSizeSlider) {
@@ -770,14 +769,14 @@ class TextEditorNode extends TextEditorBaseNode {
             } else if ("borderRadius" === name && this.borderRadiusSlider) {
                 this.borderRadiusSlider.value = value;
                 this.borderRadiusValue.textContent = value;
+            } else if ("stroke" === name && this.strokeCheckbox) {
+                this.strokeCheckbox.checked = !!value;
             }
             this.updateTextareaStyle();
         }
         this.setDirtyCanvas(true, true);
         app.graph.setDirtyCanvas(true);
     }
-
-    /* ---------- 交互事件 ---------- */
 
     onMouseDown(evt, pos) {
         if (!this.isEditing && this.linkAreas && this.linkAreas.length > 0) {
@@ -839,8 +838,6 @@ class TextEditorNode extends TextEditorBaseNode {
     }
 }
 
-// ==================== 静态属性与控件定义 ====================
-
 TextEditorNode.type = "孤海注释";
 TextEditorNode.title = "孤海注释";
 TextEditorNode.title_mode = LiteGraph.NO_TITLE;
@@ -848,15 +845,14 @@ TextEditorNode.collapsable = false;
 
 TextEditorNode["@text"] = { type: "string", title: "文本内容", default: "双击编辑文本内容...", multiline: true };
 TextEditorNode["@fontSize"] = { type: "number", title: "字体大小", default: 24, min: 8, max: 200, step: 1 };
-TextEditorNode["@fontColor"] = { type: "color", title: "字体颜色", default: "#E3E3E3" };
+TextEditorNode["@fontColor"] = { type: "color", title: "字体颜色", default: "#C8C8C8" };
 TextEditorNode["@backgroundColor"] = { type: "color", title: "背景颜色", default: "#1B4669" };
-TextEditorNode["@backgroundAlpha"] = { type: "number", title: "背景透明度", default: 0.6, min: 0, max: 1, step: 0.05 };
-TextEditorNode["@borderRadius"] = { type: "number", title: "圆角", default: 30, min: 0, max: 300, step: 1 };
+TextEditorNode["@backgroundAlpha"] = { type: "number", title: "背景透明度", default: 0.25, min: 0, max: 1, step: 0.05 };
+TextEditorNode["@borderRadius"] = { type: "number", title: "圆角", default: 20, min: 0, max: 300, step: 1 };
 TextEditorNode["@padding"] = { type: "number", title: "内边距", default: 12, min: 0, max: 50, step: 1 };
 TextEditorNode["@lineHeight"] = { type: "number", title: "行距", default: 1.4, min: 0.8, max: 3, step: 0.1 };
 TextEditorNode["@textAlign"] = { type: "combo", title: "对齐方式", values: ["left", "center", "right"], default: "center" };
-
-// ==================== 画布事件补丁 ====================
+TextEditorNode["@stroke"] = { type: "boolean", title: "描边", default: true };
 
 const _origDrawNode = LGraphCanvas.prototype.drawNode;
 LGraphCanvas.prototype.drawNode = function (node, ctx) {
@@ -892,8 +888,6 @@ LGraphCanvas.prototype.processMouseDown = function (e) {
     return _origPMDown.call(this, e);
 };
 
-// ==================== pinned 节点点击穿透 ====================
-
 const mouseState = { processingMouseDown: false, lastMouseEvent: null };
 
 const _origGNOP = LGraph.prototype.getNodeOnPos;
@@ -920,7 +914,44 @@ document.addEventListener("mouseup", function () {
     mouseState.processingMouseDown = false;
 }, true);
 
-// ==================== 注册 ComfyUI 扩展 ====================
+// Nodes 2.0 HTML VUE覆盖层双击穿透
+document.addEventListener("dblclick", function (e) {
+    const nodeBody = e.target.closest('[data-testid^="node-body-"]');
+    if (!nodeBody) return;
+
+    if (e.target.closest(
+        "input, textarea, select, [contenteditable], button, a, " +
+        "[role='button'], [role='slider'], [role='combobox'], " +
+        ".comfy-multiline-input, .comfy-input"
+    )) {
+        return;
+    }
+
+
+    const testId = nodeBody.getAttribute("data-testid");
+    const match = testId.match(/node-body-(\d+)/);
+    if (!match) return;
+
+    const nodeId = parseInt(match[1]);
+    const node = app.graph?.getNodeById(nodeId);
+    if (!node) return;
+
+
+    if (typeof node.onDblClick === "function") {
+        node.onDblClick(e);
+    }
+}, true); 
+
+
+const _dblclickFixStyle = document.createElement("style");
+_dblclickFixStyle.id = "goohaitools-fix-dblclick-style";
+_dblclickFixStyle.textContent = `
+    [data-testid^="node-body-"] { cursor: default !important; }
+    [data-testid^="node-header-"] { cursor: grab !important; }
+`;
+document.head.appendChild(_dblclickFixStyle);
+
+// ============================================
 
 app.registerExtension({
     name: "孤海注释",
