@@ -346,6 +346,9 @@ function buildIgnoreGroupsUI(node) {
 
     /* ═══════════════════ 外部同步 ═══════════════════ */
     function syncExternalState() {
+        // 【修复】节点不在当前活跃图的节点列表中时，跳过同步
+        if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return;
+
         const list = rawGroups();
         let changed = false;
 
@@ -700,7 +703,6 @@ function buildIgnoreGroupsUI(node) {
                     else { active = null; }
                     activeSet = null;
                 } else {
-                    /* at_most_one: 尝试保留当前活动的组 */
                     if (activeSet && activeSet.length) { active = activeSet[0]; }
                     else if (mode === "always_one" && active) { /* 保持 active 不变 */ }
                     else { active = null; }
@@ -978,6 +980,10 @@ function buildIgnoreGroupsUI(node) {
             document.removeEventListener("keydown", onKeyDown);
             return;
         }
+
+        // 适用于所有情况：多标签页切换（graph 对象不同）以及
+        // 同标签页内加载新工作流（graph 对象被复用但 _nodes 被重新 configure）
+        if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return;
 
         if (!pageVisible || !dirty) return;
         dirty = false;
