@@ -1,5 +1,7 @@
 import { app } from "../../../scripts/app.js";
 
+let _globalIgCounter = 0;
+
 app.registerExtension({
     name: "goohaitools.ignore_groups",
 
@@ -42,7 +44,10 @@ app.registerExtension({
 
 function buildIgnoreGroupsUI(node) {
 
-    /* ═══════════════════ 状态 ═══════════════════ */
+    const _uid = "gig_" + (++_globalIgCounter);
+    const _styleId = "guhai-ig-dyn-" + _uid;
+
+
     let filter    = "";
     let mode      = "default";
     let active    = null;
@@ -54,6 +59,7 @@ function buildIgnoreGroupsUI(node) {
     let sortOrder     = "position";
     let colorFilter   = "none";
     let prevVisibleTitles = new Set();
+    let uiScale       = 1.0;
 
     if (node.properties) {
         if (node.properties.guhai_ig_filter      != null) filter    = node.properties.guhai_ig_filter;
@@ -64,6 +70,7 @@ function buildIgnoreGroupsUI(node) {
         if (node.properties.guhai_ig_disable     != null) igDisable = !!node.properties.guhai_ig_disable;
         if (node.properties.guhai_ig_sort_order  != null) sortOrder   = node.properties.guhai_ig_sort_order;
         if (node.properties.guhai_ig_color_filter!= null) colorFilter = node.properties.guhai_ig_color_filter;
+        if (node.properties.guhai_ig_ui_scale    != null) uiScale    = Number(node.properties.guhai_ig_ui_scale) || 1.0;
     }
 
     function save() {
@@ -76,90 +83,130 @@ function buildIgnoreGroupsUI(node) {
         node.properties.guhai_ig_disable     = igDisable;
         node.properties.guhai_ig_sort_order  = sortOrder;
         node.properties.guhai_ig_color_filter = colorFilter;
+        node.properties.guhai_ig_ui_scale    = uiScale;
     }
 
 
-    /* ═══════════════════ 布局常量 ═══════════════════ */
-    const HEADER_H  = 14;
-    const ROW_H     = 34;
-    const ROW_GAP   = 15;
-    const PAD_X     = 16;
-    const ROW_PAD_L = 26;
-    const ROW_PAD_R = 16;
-    const TOGGLE_W  = 67;
-    const TOGGLE_H  = 26;
-    const KNOB_R    = 11;
+    const BASE_ROW_H     = 34;
+    const BASE_PAD_X     = 16;
+    const BASE_ROW_PAD_L = 26;
+    const BASE_ROW_PAD_R = 16;
+    const BASE_TOGGLE_W  = 67;
+    const BASE_TOGGLE_H  = 26;
+    const BASE_KNOB_R    = 8.8;
+    const BASE_FONT_SIZE = 20;
+    const BASE_BORDER_R  = 13;
+
+    const HEADER_H = 14;
+    const ROW_GAP  = 15;
+
+    function S(base) { return Math.round(base * uiScale); }
 
 
-    /* ═══════════════════ DOM CSS 注入 ═══════════════════ */
-    if (!document.getElementById("guhai-ig-styles")) {
-        const s = document.createElement("style");
-        s.id = "guhai-ig-styles";
-        s.textContent = `
-            .guhai-ig {
+    function calcWidth() {
+        const fS  = S(BASE_FONT_SIZE);
+        const pX  = S(BASE_PAD_X);
+        const rPL = S(BASE_ROW_PAD_L);
+        const rPR = S(BASE_ROW_PAD_R);
+        const tW  = S(BASE_TOGGLE_W);
+        const w = pX * 2 + rPL + rPR + 10 + tW + 2 + 8 * fS;
+        return Math.max(350, Math.round(w));
+    }
+
+
+    let _lastAppliedScale = -1;
+
+    function buildScopedCSS() {
+        const rH  = S(BASE_ROW_H);
+        const pX  = S(BASE_PAD_X);
+        const rPL = S(BASE_ROW_PAD_L);
+        const rPR = S(BASE_ROW_PAD_R);
+        const tW  = S(BASE_TOGGLE_W);
+        const tH  = S(BASE_TOGGLE_H);
+        const kR  = S(BASE_KNOB_R);
+        const kD  = kR * 2;
+        const fS  = S(BASE_FONT_SIZE);
+        const bR  = S(BASE_BORDER_R);
+
+        const knobPad  = Math.max(0, Math.round((tH - kD) / 2));
+        const knobOffL = knobPad + 3;
+        const knobOnL  = Math.max(knobOffL, tW - kD - knobPad - 3);
+
+        return `
+            .${_uid} {
                 position: relative; width: 100%; box-sizing: border-box;
                 overflow: hidden; user-select: none;
                 pointer-events: auto;
                 margin-top: -10px;
                 padding-bottom: 10px;
             }
-            .guhai-ig-header {
+            .${_uid} .guhai-ig-header {
                 height: ${HEADER_H}px; display: flex;
                 justify-content: flex-end; align-items: center;
                 padding: 0 6px;
             }
-            .guhai-ig-gear {
+            .${_uid} .guhai-ig-gear {
                 width: 16px; height: 16px; cursor: pointer;
                 opacity: 0.6; transition: opacity .15s;
                 display: flex; align-items: center; justify-content: center;
                 pointer-events: auto;
             }
-            .guhai-ig-gear:hover { opacity: 1; }
-            .guhai-ig-gear svg { width: 13px; height: 13px; }
-            .guhai-ig-empty {
+            .${_uid} .guhai-ig-gear:hover { opacity: 1; }
+            .${_uid} .guhai-ig-gear svg { width: 13px; height: 13px; }
+            .${_uid} .guhai-ig-empty {
                 color: #888; text-align: center;
                 padding: 20px 16px; font-size: 13px;
             }
-            .guhai-ig-row {
+            .${_uid} .guhai-ig-row {
                 display: flex; align-items: center; justify-content: space-between;
-                height: ${ROW_H}px;
-                margin: 0 ${PAD_X}px ${ROW_GAP}px;
-                padding: 0 ${ROW_PAD_R}px 0 ${ROW_PAD_L}px;
+                height: ${rH}px;
+                margin: 0 ${pX}px ${ROW_GAP}px;
+                padding: 0 ${rPR}px 0 ${rPL}px;
                 background: #2B2F38; border: 1px solid #6E7581;
-                border-radius: ${ROW_H / 2}px;
+                border-radius: ${bR}px;
                 cursor: pointer; box-sizing: border-box;
                 transition: border-color .15s;
                 pointer-events: auto;
             }
-            .guhai-ig-row:hover { border-color: #8E95A1; }
-            .guhai-ig-row:last-child { margin-bottom: 5px; }
-            .guhai-ig-label {
-                font-weight: bold; font-size: 20px; flex: 1;
+            .${_uid} .guhai-ig-row:hover { border-color: #8E95A1; }
+            .${_uid} .guhai-ig-row:last-child { margin-bottom: 5px; }
+            .${_uid} .guhai-ig-label {
+                font-weight: bold; font-size: ${fS}px; flex: 1;
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                 margin-right: 10px; transition: opacity .15s;
             }
-            .guhai-ig-toggle {
-                width: ${TOGGLE_W}px; height: ${TOGGLE_H}px; border-radius: ${TOGGLE_H / 2}px;
+            .${_uid} .guhai-ig-toggle {
+                width: ${tW}px; height: ${tH}px; border-radius: ${tH / 2}px;
                 background: #606060; position: relative; flex-shrink: 0;
                 transition: background .2s ease, box-shadow .2s ease;
             }
-            .guhai-ig-knob {
-                width: ${KNOB_R * 2}px; height: ${KNOB_R * 2}px; border-radius: 50%;
+            .${_uid} .guhai-ig-knob {
+                width: ${kD}px; height: ${kD}px; border-radius: 50%;
                 background: rgb(128,128,128);
-                position: absolute; top: 2px; left: 3px;
+                position: absolute; top: ${knobPad}px; left: ${knobOffL}px;
                 transition: left .2s ease, background .2s ease;
                 box-shadow: 0 1px 4px rgba(0,0,0,0.3);
             }
-            .guhai-ig-toggle.on .guhai-ig-knob {
-                left: calc(${TOGGLE_W}px - ${KNOB_R * 2}px - 3px);
+            .${_uid} .guhai-ig-toggle.on .guhai-ig-knob {
+                left: ${knobOnL}px;
                 background: rgb(230,230,230);
             }
         `;
-        document.head.appendChild(s);
+    }
+
+    function updateDynamicStyles() {
+        if (Math.abs(_lastAppliedScale - uiScale) < 0.001) return;
+        _lastAppliedScale = uiScale;
+        let s = document.getElementById(_styleId);
+        if (!s) {
+            s = document.createElement("style");
+            s.id = _styleId;
+            document.head.appendChild(s);
+        }
+        s.textContent = buildScopedCSS();
     }
 
 
-    /* ═══════════════════ 滚轮转发给 canvas ═══════════════════ */
     function forwardWheelToCanvas(e) {
         e.preventDefault();
         e.stopPropagation();
@@ -176,7 +223,6 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 几何工具 ═══════════════════ */
     function gBounds(g) {
         if (g._bounding) return [...g._bounding];
         if (g.bounding)  return [...g.bounding];
@@ -227,7 +273,6 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 组数据 ═══════════════════ */
     function rawGroups() {
         const g = app.graph;
         if (!g || !g._groups) return [];
@@ -306,7 +351,6 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 旁路 / 恢复 ═══════════════════ */
     function bypassGroup(grp) {
         collectNodes(grp).forEach(n => {
             if (igDisable) { n.mode = 2; } else { n.mode = 4; }
@@ -325,7 +369,6 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 组状态检测 ═══════════════════ */
     function getGroupState(grp) {
         const nodes = collectNodes(grp);
         if (nodes.length === 0) return true;
@@ -344,9 +387,7 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 外部同步 ═══════════════════ */
     function syncExternalState() {
-        // 【修复】节点不在当前活跃图的节点列表中时，跳过同步
         if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return;
 
         const list = rawGroups();
@@ -388,7 +429,6 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 颜色工具 ═══════════════════ */
     function hexToRgba(hex, alpha) {
         if (!hex || hex.length < 7) return `rgba(120,120,120,${alpha})`;
         const r = parseInt(hex.slice(1, 3), 16);
@@ -398,7 +438,6 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ DOM UI ═══════════════════ */
     const gearSVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <circle cx="12" cy="12" r="3" fill="rgba(120,120,120,0.3)" stroke="rgba(153,153,153,0.6)" stroke-width="1"/>
         <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58z"
@@ -406,26 +445,27 @@ function buildIgnoreGroupsUI(node) {
     </svg>`;
 
     const rootEl = document.createElement("div");
-    rootEl.className = "guhai-ig";
+    rootEl.className = "guhai-ig " + _uid;
     rootEl.style.visibility = "hidden";
 
     let _lastBuildSig = "";
 
     function calcHeight() {
+        const rowH = S(BASE_ROW_H);
         const cnt = Math.max(visible().length, 1);
-        return HEADER_H + cnt * (ROW_H + ROW_GAP) - ROW_GAP + 10;
+        return HEADER_H + cnt * (rowH + ROW_GAP) - ROW_GAP + 10;
     }
 
     function buildStatefulSig() {
         const list = visible();
-        const effectiveColor = nameColor || "#469b66";
+        const effectiveColor = nameColor || "#528e69";
         let sig = list.map(g => {
             const isOn = mode === "default"
                 ? (Array.isArray(activeSet) && activeSet.includes(g.title))
                 : g.title === active;
             return g.title + (isOn ? ":1" : ":0");
         }).join("\x00");
-        sig += "|" + effectiveColor + "|" + (mode || "");
+        sig += "|" + effectiveColor + "|" + (mode || "") + "|" + uiScale;
         return sig;
     }
 
@@ -435,7 +475,7 @@ function buildIgnoreGroupsUI(node) {
         _lastBuildSig = sig;
 
         const list = visible();
-        const effectiveColor = nameColor || "#469b66";
+        const effectiveColor = nameColor || "#528e69";
 
         rootEl.innerHTML = "";
 
@@ -504,7 +544,6 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ DOM Widget 注册 ═══════════════════ */
     const domWidget = node.addDOMWidget("guhai_ig", "ig_custom", rootEl, {
         serialize: false,
         hideOnZoom: false,
@@ -512,16 +551,15 @@ function buildIgnoreGroupsUI(node) {
 
     if (domWidget) {
         domWidget.computeSize = function () {
-            return [400, calcHeight()];
+            return [calcWidth(), calcHeight()];
         };
     }
 
     node.computeSize = function () {
-        return [400, calcHeight()];
+        return [calcWidth(), calcHeight()];
     };
 
 
-    /* ═══════════════════ 核心刷新 ═══════════════════ */
     let lastSig = "";
     let lastStateSig = "";
     let _preserveActive = false;
@@ -602,11 +640,11 @@ function buildIgnoreGroupsUI(node) {
 
         prevVisibleTitles = currentVisibleTitles;
 
+        updateDynamicStyles();
         buildDom(forceApply || stateChanged || listChanged);
     }
 
 
-    /* ═══════════════════ 切换逻辑 ═══════════════════ */
     function handleToggle(title) {
         if (mode === "default") {
             if (!Array.isArray(activeSet)) activeSet = [];
@@ -642,11 +680,13 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    /* ═══════════════════ 选项设置 ═══════════════════ */
     let _settingsCleanup = null;
 
     function showSettings(x, y) {
         if (_settingsCleanup) { _settingsCleanup(); _settingsCleanup = null; }
+
+        let _initialSettingsScale = uiScale;
+        let _needsNodeHeightRefresh = false;
 
         const overlay = document.createElement("div");
         overlay.id = "guhai_ig_overlay";
@@ -662,7 +702,7 @@ function buildIgnoreGroupsUI(node) {
         Object.assign(pop.style, {
             position: "fixed",
             left: Math.min(x, innerWidth  - 280) + "px",
-            top:  Math.min(y, innerHeight - 560) + "px",
+            top:  Math.min(y, innerHeight - 620) + "px",
             background: "#2a2a2a", border: "1px solid #555",
             borderRadius: "8px", padding: "14px 18px",
             zIndex: "99999", minWidth: "250px",
@@ -677,6 +717,11 @@ function buildIgnoreGroupsUI(node) {
             document.removeEventListener("keydown", onEsc);
             document.removeEventListener("mousedown", closeColorPanel);
             _settingsCleanup = null;
+            if (_needsNodeHeightRefresh) {
+                _needsNodeHeightRefresh = false;
+                node.size = [calcWidth(), calcHeight()];
+                app.graph.change();
+            }
         }
         _settingsCleanup = closePopup;
 
@@ -693,6 +738,14 @@ function buildIgnoreGroupsUI(node) {
             igDisable   = dRadioDisable.checked;
             sortOrder   = sSelect.value;
             const newMode = mSelect.value;
+            const newScale = parseFloat(scaleInput.value) || 1.0;
+
+            uiScale = newScale;
+            updateDynamicStyles();
+
+            if (Math.abs(newScale - _initialSettingsScale) > 0.001) {
+                _needsNodeHeightRefresh = true;
+            }
 
             if (newMode !== mode) {
                 if (newMode === "default") {
@@ -704,7 +757,7 @@ function buildIgnoreGroupsUI(node) {
                     activeSet = null;
                 } else {
                     if (activeSet && activeSet.length) { active = activeSet[0]; }
-                    else if (mode === "always_one" && active) { /* 保持 active 不变 */ }
+                    else if (mode === "always_one" && active) { }
                     else { active = null; }
                     activeSet = null;
                 }
@@ -907,6 +960,36 @@ function buildIgnoreGroupsUI(node) {
         sSelect.value = sortOrder; pop.appendChild(sSelect);
         sSelect.addEventListener("change", applyAll);
 
+        const scaleLabel = document.createElement("div");
+        scaleLabel.textContent = "UI组件大小";
+        Object.assign(scaleLabel.style, { fontSize: "13px", fontWeight: "bold", marginBottom: "4px" });
+        pop.appendChild(scaleLabel);
+
+        const scaleRow = document.createElement("div");
+        Object.assign(scaleRow.style, { display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" });
+
+        const scaleInput = document.createElement("input");
+        scaleInput.type = "range";
+        scaleInput.min = "0.5";
+        scaleInput.max = "5.0";
+        scaleInput.step = "0.1";
+        scaleInput.value = String(uiScale);
+        Object.assign(scaleInput.style, {
+            flex: "1", height: "4px", appearance: "none", background: "#555",
+            borderRadius: "2px", outline: "none", cursor: "pointer",
+        });
+        const scaleVal = document.createElement("span");
+        scaleVal.textContent = uiScale.toFixed(1) + "x";
+        Object.assign(scaleVal.style, { minWidth: "36px", fontSize: "12px", color: "#aaa", textAlign: "right" });
+        scaleRow.appendChild(scaleInput);
+        scaleRow.appendChild(scaleVal);
+        pop.appendChild(scaleRow);
+
+        scaleInput.addEventListener("input", () => {
+            scaleVal.textContent = (parseFloat(scaleInput.value) || 1.0).toFixed(1) + "x";
+            applyAll();
+        });
+
         const tcLabel = document.createElement("div");
         tcLabel.textContent = "主题颜色";
         Object.assign(tcLabel.style, { fontSize: "13px", fontWeight: "bold", marginBottom: "4px" });
@@ -916,7 +999,7 @@ function buildIgnoreGroupsUI(node) {
         Object.assign(colorRow.style, { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" });
 
         const cInput = document.createElement("input");
-        cInput.type = "color"; cInput.value = nameColor || "#469b66";
+        cInput.type = "color"; cInput.value = nameColor || "#528e69";
         Object.assign(cInput.style, {
             width: "36px", height: "28px", padding: "0",
             border: "1px solid #555", borderRadius: "4px", background: "#1a1a1a", cursor: "pointer",
@@ -924,7 +1007,7 @@ function buildIgnoreGroupsUI(node) {
         colorRow.appendChild(cInput);
 
         const cHex = document.createElement("input");
-        cHex.type = "text"; cHex.value = nameColor || "#469b66";
+        cHex.type = "text"; cHex.value = nameColor || "#528e69";
         Object.assign(cHex.style, {
             flex: "1", padding: "5px 8px", fontSize: "13px",
             background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
@@ -946,7 +1029,6 @@ function buildIgnoreGroupsUI(node) {
     node._guhaiShowSettings = showSettings;
 
 
-    /* ═══════════════════ 脏标记系统 ═══════════════════ */
     if (app.graph && typeof app.graph.change === "function") {
         const origGraphChange = app.graph.change;
         app.graph.change = function () {
@@ -964,7 +1046,6 @@ function buildIgnoreGroupsUI(node) {
     document.addEventListener("keydown", onKeyDown);
 
 
-    /* ═══════════════════ 定时同步 ═══════════════════ */
     let pageVisible = !document.hidden;
     function onVisibilityChange() {
         const nowVisible = !document.hidden;
@@ -978,11 +1059,11 @@ function buildIgnoreGroupsUI(node) {
             clearInterval(timer);
             document.removeEventListener("visibilitychange", onVisibilityChange);
             document.removeEventListener("keydown", onKeyDown);
+            const s = document.getElementById(_styleId);
+            if (s) s.remove();
             return;
         }
 
-        // 适用于所有情况：多标签页切换（graph 对象不同）以及
-        // 同标签页内加载新工作流（graph 对象被复用但 _nodes 被重新 configure）
         if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return;
 
         if (!pageVisible || !dirty) return;
@@ -1000,6 +1081,7 @@ function buildIgnoreGroupsUI(node) {
             selfChanging = true;
             try {
                 syncExternalState();
+                updateDynamicStyles();
                 if (listChanged) {
                     refresh(false);
                 } else {
@@ -1013,7 +1095,6 @@ function buildIgnoreGroupsUI(node) {
     }, 500);
 
 
-    /* ═══════════════════ 工作流加载后同步 ═══════════════════ */
     node._guhaiSyncGroups = () => {
         filter     = (node.properties && node.properties.guhai_ig_filter)      || "";
         mode       = (node.properties && node.properties.guhai_ig_mode)        || "default";
@@ -1023,19 +1104,23 @@ function buildIgnoreGroupsUI(node) {
         igDisable  = (node.properties && node.properties.guhai_ig_disable)     || false;
         sortOrder  = (node.properties && node.properties.guhai_ig_sort_order)  || "position";
         colorFilter= (node.properties && node.properties.guhai_ig_color_filter)|| "none";
+        uiScale    = (node.properties && node.properties.guhai_ig_ui_scale)    || 1.0;
         lastSig = "";
         lastStateSig = "";
         prevVisibleTitles = new Set();
         _preserveActive = true;
+        _lastAppliedScale = -1;
         dirty = true;
         refresh(true);
     };
 
 
-    /* ═══════════════════ 初始构建 ═══════════════════ */
+    updateDynamicStyles();
     refresh(false);
     lastStateSig = computeStateSig(visible());
     dirty = false;
+
+    node.size = [calcWidth(), calcHeight()];
 
     requestAnimationFrame(() => { rootEl.style.visibility = "visible"; });
 }
