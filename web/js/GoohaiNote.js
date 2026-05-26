@@ -25,6 +25,8 @@ const LINE_START_FORBIDDEN = new Set([
 ]);
 const isLineStartForbidden = (ch) => LINE_START_FORBIDDEN.has(ch);
 
+const _FIXED_FONT = 'Inter, Arial, sans-serif';
+
 let _cachedComfyFont = null;
 let _cachedFontTime = 0;
 const FONT_CACHE_TTL = 3000;
@@ -32,37 +34,7 @@ const FONT_CACHE_TTL = 3000;
 function getComfyUIFont() {
     const now = Date.now();
     if (_cachedComfyFont && (now - _cachedFontTime) < FONT_CACHE_TTL) return _cachedComfyFont;
-
-    const root = getComputedStyle(document.documentElement);
-    for (const v of ['--font-family', '--fontFamily', '--p-font-family', '--ui-font-family', '--body-font-family']) {
-        const val = root.getPropertyValue(v).trim();
-        if (val && val !== '' && val !== 'inherit' && val !== 'initial') {
-            _cachedComfyFont = val; _cachedFontTime = now; return val;
-        }
-    }
-
-    for (const sel of ['.p-panelmenu .p-panelmenu-item-content', '.p-panelmenu', '.comfy-multiline-input', '.litegraph .dialog', '.p-button', '#vue-app', '#app']) {
-        const el = document.querySelector(sel);
-        if (el) {
-            const ff = getComputedStyle(el).fontFamily;
-            if (ff && ff.trim() !== '' && !/^["']?serif/i.test(ff.trim())) {
-                _cachedComfyFont = ff; _cachedFontTime = now; return ff;
-            }
-        }
-    }
-
-    const walkTargets = document.querySelectorAll('button, label, span, p, h1, h2, h3, h4, a, li, .p-component');
-    for (const el of walkTargets) {
-        const ff = getComputedStyle(el).fontFamily;
-        if (ff && ff.trim() !== '') {
-            const lower = ff.trim().toLowerCase();
-            if (lower !== 'serif' && !lower.startsWith('serif,')) {
-                _cachedComfyFont = ff; _cachedFontTime = now; return ff;
-            }
-        }
-    }
-
-    _cachedComfyFont = '-apple-system, BlinkMacSystemFont, "Segoe UI", DengXian, Roboto, "Helvetica Neue", "Noto Sans", "Microsoft YaHei", "PingFang SC", sans-serif';
+    _cachedComfyFont = _FIXED_FONT;
     _cachedFontTime = now;
     return _cachedComfyFont;
 }
@@ -940,7 +912,7 @@ document.addEventListener("dblclick", function (e) {
     if (typeof node.onDblClick === "function") {
         node.onDblClick(e);
     }
-}, true); 
+}, true);
 
 
 const _dblclickFixStyle = document.createElement("style");

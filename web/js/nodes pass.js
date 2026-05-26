@@ -86,6 +86,25 @@ function buildIgnoreGroupsUI(node) {
         node.properties.guhai_ig_ui_scale    = uiScale;
     }
 
+    function _guhaiSyncGroups() {
+        filter     = (node.properties && node.properties.guhai_ig_filter)      || "";
+        mode       = (node.properties && node.properties.guhai_ig_mode)        || "default";
+        active     = (node.properties && node.properties.guhai_ig_active)      || null;
+        activeSet  = (node.properties && node.properties.guhai_ig_active_set)  || null;
+        nameColor  = (node.properties && node.properties.guhai_ig_name_color)  || null;
+        igDisable  = (node.properties && node.properties.guhai_ig_disable)     || false;
+        sortOrder  = (node.properties && node.properties.guhai_ig_sort_order)  || "position";
+        colorFilter= (node.properties && node.properties.guhai_ig_color_filter)|| "none";
+        uiScale    = (node.properties && node.properties.guhai_ig_ui_scale)    || 1.0;
+        lastSig = "";
+        lastStateSig = "";
+        prevVisibleTitles = new Set();
+        _preserveActive = true;
+        _lastAppliedScale = -1;
+        dirty = true;
+        refresh(true);
+    }
+
 
     const BASE_ROW_H     = 34;
     const BASE_PAD_X     = 16;
@@ -273,10 +292,16 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    function rawGroups() {
+    /* ── 优化：rawGroups 缓存机制 ── */
+    let _rgCache = null;
+    let _rgCacheFrame = 0;
+
+    function rawGroups(invalidate) {
+        if (invalidate) { _rgCache = null; }
+        if (_rgCache) return _rgCache;
         const g = app.graph;
-        if (!g || !g._groups) return [];
-        return g._groups.map(gr => {
+        if (!g || !g._groups) { _rgCache = []; return _rgCache; }
+        _rgCache = g._groups.map(gr => {
             const color = getGroupColor(gr);
             return {
                 title:  (gr.title || "").trim() || "Unnamed",
@@ -285,11 +310,18 @@ function buildIgnoreGroupsUI(node) {
                 color:  color,
             };
         });
+        return _rgCache;
     }
 
-    function visible() {
-        let list = rawGroups();
-        list = list.filter(g => collectNodes(g, list).length > 0);
+    function invalidateRawGroups() {
+        _rgCache = null;
+    }
+
+    /* ── 优化：visible/collectNodes 支持接收缓存 ── */
+    function visible(cachedAll) {
+        let list = cachedAll || rawGroups();
+        if (!cachedAll) list = list.slice(); // 防止修改缓存
+        list = list.filter(g => collectNodes(g, list, cachedAll).length > 0);
         if (filter.trim()) {
             const kw = filter.trim().toLowerCase();
             list = list.filter(g => g.title.toLowerCase().includes(kw));
@@ -315,7 +347,7 @@ function buildIgnoreGroupsUI(node) {
         return list;
     }
 
-    function collectNodes(grp, allGroups) {
+    function collectNodes(grp, allGroups, cachedAll) {
         const g = app.graph;
         if (!g || !g._nodes) return [];
         const all  = allGroups || rawGroups();
@@ -351,14 +383,14 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    function bypassGroup(grp) {
-        collectNodes(grp).forEach(n => {
+    function bypassGroup(grp, cachedAll) {
+        collectNodes(grp, null, cachedAll).forEach(n => {
             if (igDisable) { n.mode = 2; } else { n.mode = 4; }
         });
     }
 
-    function restoreGroup(grp) {
-        collectNodes(grp).forEach(n => {
+    function restoreGroup(grp, cachedAll) {
+        collectNodes(grp, null, cachedAll).forEach(n => {
             n.mode = 0;
             if (n.flags) n.flags.disabled = false;
         });
@@ -369,8 +401,8 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    function getGroupState(grp) {
-        const nodes = collectNodes(grp);
+    function getGroupState(grp, cachedAll) {
+        const nodes = collectNodes(grp, null, cachedAll);
         if (nodes.length === 0) return true;
         const allActive   = nodes.every(n => isNodeActive(n));
         const allInactive = nodes.every(n => !isNodeActive(n));
@@ -379,24 +411,24 @@ function buildIgnoreGroupsUI(node) {
         return null;
     }
 
-    function computeStateSig(list) {
+    function computeStateSig(list, cachedAll) {
         return list.map(g => {
-            const s = getGroupState(g);
+            const s = getGroupState(g, cachedAll);
             return g.title + ":" + (s === true ? "1" : s === false ? "0" : "m");
         }).join("\x00");
     }
 
 
-    function syncExternalState() {
-        if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return;
+    function syncExternalState(cachedAll) {
+        if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return false;
 
-        const list = rawGroups();
         let changed = false;
 
         if (mode === "default") {
-            if (!Array.isArray(activeSet)) return;
-            list.forEach(g => {
-                const gs = getGroupState(g);
+            if (!Array.isArray(activeSet)) return false;
+            const allList = rawGroups();
+            allList.forEach(g => {
+                const gs = getGroupState(g, cachedAll);
                 const isActive = activeSet.includes(g.title);
                 if (gs === true && !isActive) {
                     activeSet.push(g.title);
@@ -406,26 +438,57 @@ function buildIgnoreGroupsUI(node) {
                     changed = true;
                 }
             });
-        } else if (mode === "at_most_one") {
-            if (active) {
-                const grp = list.find(g => g.title === active);
-                if (grp && getGroupState(grp) === false) {
-                    active = null;
-                    changed = true;
-                }
-            }
-            if (!active) {
-                for (const g of list) {
-                    if (getGroupState(g) === true) {
-                        active = g.title;
+        } else {
+            const filteredList = visible(cachedAll);
+            if (mode === "always_one") {
+                if (active) {
+                    const grp = filteredList.find(g => g.title === active);
+                    if (grp && getGroupState(grp, cachedAll) === false) {
+                        const nextActive = filteredList.find(g => getGroupState(g, cachedAll) === true);
+                        active = nextActive ? nextActive.title : (filteredList.length ? filteredList[0].title : null);
                         changed = true;
-                        break;
+                    } else if (!grp) {
+                        if (filteredList.length) {
+                            const firstActive = filteredList.find(g => getGroupState(g, cachedAll) === true);
+                            active = firstActive ? firstActive.title : filteredList[0].title;
+                        } else {
+                            active = null;
+                        }
+                        changed = true;
+                    }
+                }
+                if (!active && filteredList.length) {
+                    const firstActive = filteredList.find(g => getGroupState(g, cachedAll) === true);
+                    if (firstActive) {
+                        active = firstActive.title;
+                        changed = true;
+                    }
+                }
+            } else if (mode === "at_most_one") {
+                if (active) {
+                    const grp = filteredList.find(g => g.title === active);
+                    if (grp && getGroupState(grp, cachedAll) === false) {
+                        active = null;
+                        changed = true;
+                    } else if (!grp) {
+                        active = null;
+                        changed = true;
+                    }
+                }
+                if (!active) {
+                    for (const g of filteredList) {
+                        if (getGroupState(g, cachedAll) === true) {
+                            active = g.title;
+                            changed = true;
+                            break;
+                        }
                     }
                 }
             }
         }
 
         if (changed) save();
+        return changed;
     }
 
 
@@ -448,6 +511,9 @@ function buildIgnoreGroupsUI(node) {
     rootEl.className = "guhai-ig " + _uid;
     rootEl.style.visibility = "hidden";
 
+    /* ── 优化：wheel 监听器只绑定一次，不再在 buildDom 中重复添加 ── */
+    rootEl.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
+
     let _lastBuildSig = "";
 
     function calcHeight() {
@@ -458,7 +524,7 @@ function buildIgnoreGroupsUI(node) {
 
     function buildStatefulSig() {
         const list = visible();
-        const effectiveColor = nameColor || "#528e69";
+        const effectiveColor = nameColor || "#a89961";
         let sig = list.map(g => {
             const isOn = mode === "default"
                 ? (Array.isArray(activeSet) && activeSet.includes(g.title))
@@ -475,11 +541,10 @@ function buildIgnoreGroupsUI(node) {
         _lastBuildSig = sig;
 
         const list = visible();
-        const effectiveColor = nameColor || "#528e69";
+        const effectiveColor = nameColor || "#a89961";
 
         rootEl.innerHTML = "";
-
-        rootEl.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
+        /* ── 优化：移除了此处的 wheel 监听器重复绑定 ── */
 
         const header = document.createElement("div");
         header.className = "guhai-ig-header";
@@ -565,7 +630,10 @@ function buildIgnoreGroupsUI(node) {
     let _preserveActive = false;
 
     function refresh(forceApply) {
-        const list = visible();
+        /* ── 优化：整个刷新周期内只调用一次 rawGroups ── */
+        const cachedAll = rawGroups(true);
+
+        const list = visible(cachedAll);
         const currentVisibleTitles = new Set(list.map(g => g.title));
         const sig  = list.map(g => g.title).join("\x00");
         const listChanged = (sig !== lastSig);
@@ -576,15 +644,15 @@ function buildIgnoreGroupsUI(node) {
         if (mode === "default") {
             if (!Array.isArray(activeSet)) {
                 activeSet = [];
-                rawGroups().forEach(g => {
-                    const gs = getGroupState(g);
+                cachedAll.forEach(g => {
+                    const gs = getGroupState(g, cachedAll);
                     if (gs !== false) {
                         activeSet.push(g.title);
                     }
                 });
                 stateChanged = true;
             } else {
-                const allTitles = new Set(rawGroups().map(g => g.title));
+                const allTitles = new Set(cachedAll.map(g => g.title));
                 const before = activeSet.length;
                 activeSet = activeSet.filter(t => allTitles.has(t));
                 if (activeSet.length !== before) stateChanged = true;
@@ -592,7 +660,7 @@ function buildIgnoreGroupsUI(node) {
                 if (listChanged) {
                     list.forEach(g => {
                         if (!prevVisibleTitles.has(g.title)) {
-                            const gs = getGroupState(g);
+                            const gs = getGroupState(g, cachedAll);
                             const idx = activeSet.indexOf(g.title);
                             if (gs === true && idx < 0) {
                                 activeSet.push(g.title);
@@ -607,13 +675,27 @@ function buildIgnoreGroupsUI(node) {
             }
         } else {
             if (!_preserveActive) {
-                const allGroupsList = rawGroups();
-                if (active && !allGroupsList.find(g => g.title === active)) {
-                    active = (mode === "always_one" && allGroupsList.length) ? allGroupsList[0].title : null;
+                const hasFilter = !!(filter.trim() || (colorFilter && colorFilter !== "none"));
+
+                if (active && !cachedAll.some(g => g.title === active)) {
+                    active = (mode === "always_one" && list.length) ? list[0].title : null;
                     stateChanged = true;
                 }
-                if (mode === "always_one" && !active && allGroupsList.length) {
-                    active = allGroupsList[0].title;
+
+                if (active && hasFilter) {
+                    const filteredTitles = new Set(list.map(g => g.title));
+                    if (!filteredTitles.has(active)) {
+                        if (mode === "always_one" && list.length) {
+                            active = list[0].title;
+                        } else {
+                            active = null;
+                        }
+                        stateChanged = true;
+                    }
+                }
+
+                if (mode === "always_one" && !active && list.length) {
+                    active = list[0].title;
                     stateChanged = true;
                 }
             }
@@ -629,8 +711,8 @@ function buildIgnoreGroupsUI(node) {
                     const isOn = mode === "default"
                         ? activeSet.includes(g.title)
                         : g.title === active;
-                    if (isOn) restoreGroup(g);
-                    else      bypassGroup(g);
+                    if (isOn) restoreGroup(g, cachedAll);
+                    else      bypassGroup(g, cachedAll);
                 });
                 try { app.graph.change(); } catch (_) {}
             } finally {
@@ -751,14 +833,26 @@ function buildIgnoreGroupsUI(node) {
                 if (newMode === "default") {
                     activeSet = visible().map(g => g.title);
                 } else if (newMode === "always_one") {
-                    if (activeSet && activeSet.length) { active = activeSet[0]; }
-                    else if (visible().length) { active = visible()[0].title; }
-                    else { active = null; }
+                    const fl = visible();
+                    const ft = new Set(fl.map(g => g.title));
+                    if (activeSet && activeSet.length) {
+                        const match = activeSet.find(t => ft.has(t));
+                        active = match || (fl.length ? fl[0].title : null);
+                    } else {
+                        active = fl.length ? fl[0].title : null;
+                    }
                     activeSet = null;
                 } else {
-                    if (activeSet && activeSet.length) { active = activeSet[0]; }
-                    else if (mode === "always_one" && active) { }
-                    else { active = null; }
+                    const fl = visible();
+                    const ft = new Set(fl.map(g => g.title));
+                    if (activeSet && activeSet.length) {
+                        const match = activeSet.find(t => ft.has(t));
+                        active = match || null;
+                    } else if (mode === "always_one" && active && ft.has(active)) {
+                        /* keep */
+                    } else {
+                        active = null;
+                    }
                     activeSet = null;
                 }
                 mode = newMode;
@@ -999,7 +1093,7 @@ function buildIgnoreGroupsUI(node) {
         Object.assign(colorRow.style, { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" });
 
         const cInput = document.createElement("input");
-        cInput.type = "color"; cInput.value = nameColor || "#528e69";
+        cInput.type = "color"; cInput.value = nameColor || "#a89961";
         Object.assign(cInput.style, {
             width: "36px", height: "28px", padding: "0",
             border: "1px solid #555", borderRadius: "4px", background: "#1a1a1a", cursor: "pointer",
@@ -1007,7 +1101,7 @@ function buildIgnoreGroupsUI(node) {
         colorRow.appendChild(cInput);
 
         const cHex = document.createElement("input");
-        cHex.type = "text"; cHex.value = nameColor || "#528e69";
+        cHex.type = "text"; cHex.value = nameColor || "#a89961";
         Object.assign(cHex.style, {
             flex: "1", padding: "5px 8px", fontSize: "13px",
             background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
@@ -1027,6 +1121,7 @@ function buildIgnoreGroupsUI(node) {
     }
 
     node._guhaiShowSettings = showSettings;
+    node._guhaiSyncGroups   = _guhaiSyncGroups;
 
 
     if (app.graph && typeof app.graph.change === "function") {
@@ -1054,6 +1149,8 @@ function buildIgnoreGroupsUI(node) {
     }
     document.addEventListener("visibilitychange", onVisibilityChange);
 
+
+    /* ── 优化：重构轮询循环，dirty 为 false 时跳过昂贵的状态签名计算 ── */
     const timer = setInterval(() => {
         if (!node.graph) {
             clearInterval(timer);
@@ -1066,53 +1163,35 @@ function buildIgnoreGroupsUI(node) {
 
         if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return;
 
-        if (!pageVisible || !dirty) return;
-        dirty = false;
+        if (!pageVisible) return;
 
-        const list = visible();
-        const sig = list.map(g => g.title).join("\x00");
-        const listChanged = (sig !== lastSig);
-        const stateSig = computeStateSig(list);
-        const stateChanged = (stateSig !== lastStateSig);
+        if (dirty) {
+            dirty = false;
+            const cachedAll = rawGroups(true);
+            const list = visible(cachedAll);
+            const sig = list.map(g => g.title).join("\x00");
+            const listChanged = (sig !== lastSig);
+            const stateSig = computeStateSig(list, cachedAll);
+            const stateChanged = (stateSig !== lastStateSig);
 
-        if (listChanged || stateChanged) {
-            lastStateSig = stateSig;
-
-            selfChanging = true;
-            try {
-                syncExternalState();
-                updateDynamicStyles();
-                if (listChanged) {
-                    refresh(false);
-                } else {
-                    buildDom(true);
+            if (listChanged || stateChanged) {
+                lastStateSig = stateSig;
+                selfChanging = true;
+                try {
+                    const syncChanged = syncExternalState(cachedAll);
+                    updateDynamicStyles();
+                    if (listChanged || syncChanged) {
+                        refresh(true);
+                    } else {
+                        buildDom(true);
+                    }
+                    try { app.graph.change(); } catch (_) {}
+                } finally {
+                    selfChanging = false;
                 }
-                try { app.graph.change(); } catch (_) {}
-            } finally {
-                selfChanging = false;
             }
         }
     }, 500);
-
-
-    node._guhaiSyncGroups = () => {
-        filter     = (node.properties && node.properties.guhai_ig_filter)      || "";
-        mode       = (node.properties && node.properties.guhai_ig_mode)        || "default";
-        active     = (node.properties && node.properties.guhai_ig_active)      || null;
-        activeSet  = (node.properties && node.properties.guhai_ig_active_set)  || null;
-        nameColor  = (node.properties && node.properties.guhai_ig_name_color)  || null;
-        igDisable  = (node.properties && node.properties.guhai_ig_disable)     || false;
-        sortOrder  = (node.properties && node.properties.guhai_ig_sort_order)  || "position";
-        colorFilter= (node.properties && node.properties.guhai_ig_color_filter)|| "none";
-        uiScale    = (node.properties && node.properties.guhai_ig_ui_scale)    || 1.0;
-        lastSig = "";
-        lastStateSig = "";
-        prevVisibleTitles = new Set();
-        _preserveActive = true;
-        _lastAppliedScale = -1;
-        dirty = true;
-        refresh(true);
-    };
 
 
     updateDynamicStyles();
