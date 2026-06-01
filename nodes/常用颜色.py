@@ -64,7 +64,7 @@ class 常用颜色孤海:
 
     # 节点输出类型
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("颜色字符串",)
+    RETURN_NAMES = ("T",)
     FUNCTION = "获取颜色"
     CATEGORY = "🔵孤海/常用工具"
     OUTPUT_NODE = False
