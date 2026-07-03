@@ -88,7 +88,7 @@
 | **遮罩对齐v2** | 遮罩与目标位置对齐 V2 |
 | **遮罩中心对齐** | 按遮罩中心对齐 |
 | **遮罩裁剪** | 根据遮罩裁剪图像 |
-| **遮罩裁剪V2** | 遮罩裁剪 V2 增强版 |
+| **遮罩裁剪V2** | 通过遮罩裁剪再贴回，解决采样像素偏移问题 |
 | **裁剪恢复** | 将裁剪后的图像恢复到原坐标 |
 | **遮罩模糊生长按比例** | 遮罩按比例模糊扩张/收缩 |
 | **遮罩混合运算** | 遮罩加减乘/交并补等运算 |
@@ -211,36 +211,6 @@ goohai_universal_slider.js 万能滑条前端交互
 id_photo_clothing.js / marry.js 证件照、结婚登记照服装选择前端组件
 启用后部分节点（取色器、万能滑条、服装切换等）会有更友好的交互 UI。
 
-## 📄 文件结构 
-
-Goohaitools-comfyui/
-├── __init__.py                  # 节点动态加载入口
-├── extension.json               # ComfyUI Manager 扩展配置
-├── requirements.txt             # Python 依赖（清华镜像源）
-├── README.md                    # 本文档
-├── .gitignore
-├── shape_predictor_5_face_landmarks.dat   # dlib 5 点人脸关键点模型
-├── fonts/                       # 内置字体（水印/排版/证件照）
-│   ├── 黑体.ttf / 楷体.ttf / 苹方粗体.ttf / 苹方特粗.ttf / 华文细黑.ttf
-│   ├── OCR-B 10 BT.ttf / Capture it.ttf / wsis721.ttf / font.ttf ...
-├── image/
-│   └── ID_Photo/                # 证件照服装/发型模板素材（男女士西装、马甲、衬衫、结婚照等）
-├── nodes/                       # 全部 60+ 个节点源码（按功能命名 .py）
-│   ├── 加载图像.py / 加载批次图像.py
-│   ├── 人脸自动矫正.py / 面部对齐.py / 证件照裁剪.py ...
-│   ├── 遮罩分析.py / 遮罩对齐V2.py / 遮罩混合运算.py ...
-│   ├── 图像缩放V2.py / 图像裁剪（主体保护）.py ...
-│   ├── 批量自动排版.py / 身份证自动扶正拼版.py ...
-│   └── ...
-└── web/
-    └── js/                      # 前端 Widget 组件
-        ├── BOOLEAN.js
-        ├── colorWidget.js
-        ├── goohai_universal_slider.js
-        ├── id_photo_clothing.js
-        ├── marry.js
-        ├── GoohaiNote.js
-        └── nodes pass.js
 
 ## 📝 许可证 
 
