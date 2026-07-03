@@ -187,19 +187,19 @@ pip install -r requirements.txt
 
 
 ### 方法二：手动下载 
-```
+
 下载 Goohaitools-comfyui ZIP 包
 解压到 ComfyUI/custom_nodes/ 目录，确保目录名为 Goohaitools-comfyui
 进入该目录执行 pip install -r requirements.txt
 重启 ComfyUI
-```
+
 requirements.txt 主要依赖：
-```
+
 opencv-python / scipy / scikit-image / matplotlib：图像处理核心
 mediapipe>=0.10.20：人脸/关键点检测
 dlib-bin>=19.24.6：人脸 5 点关键点模型（仓库已内置 shape_predictor_5_face_landmarks.dat）
 若使用国内网络 pip 安装慢，requirements 已默认配置清华镜像源（-i https://pypi.tuna.tsinghua.edu.cn/simple）。
-```
+
 ## 🔧 前端扩展组件 
 
 本插件在 web/js/ 下提供多个前端 Widget 增强：
@@ -213,7 +213,6 @@ id_photo_clothing.js / marry.js 证件照、结婚登记照服装选择前端组
 
 ## 📄 文件结构 
 
-```
 Goohaitools-comfyui/
 ├── __init__.py                  # 节点动态加载入口
 ├── extension.json               # ComfyUI Manager 扩展配置
@@ -242,13 +241,12 @@ Goohaitools-comfyui/
         ├── marry.js
         ├── GoohaiNote.js
         └── nodes pass.js
-```
+
 ## 📝 许可证 
-```
+
 本项目采用开源协议发布，欢迎 Star、Fork、PR。
 
 💬 反馈 & 交流
 📺 B 站（视频教程 / 工作流演示）：孤海B
 🐛 GitHub Issues：提 Bug & 需求
 💡 如有问题、想要新增的功能或节点建议，欢迎在 GitHub 提 Issue 或 B 站私信；觉得好用的话，欢迎给仓库点个 Star ⭐。
-```
