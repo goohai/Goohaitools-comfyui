@@ -17,9 +17,16 @@ class LoadImageGoohai:
             f for f in os.listdir(input_dir)
             if os.path.isfile(os.path.join(input_dir, f))
         ]
+        files = folder_paths.filter_files_content_types(files, ["image"])
+        image_files = sorted(f for f in files if f != "无")
+        files = ["无"] + image_files
+        default_image = image_files[0] if image_files else "无"
         return {
             "required": {
-                "image": (sorted(files), {"image_upload": True}),
+                "image": (files, {
+                    "image_upload": True,
+                    "default": default_image,
+                }),
             },
             "optional": {
                 "保留透明通道": ("BOOLEAN", {
@@ -127,25 +134,42 @@ class LoadImageGoohai:
             return name
         return cls._find_by_mtime(image_str)
 
+    @staticmethod
+    def _is_empty_selection(image):
+        if image is None:
+            return True
+        value = str(image).strip()
+        return not value or value == "无"
+
     def load_image(self, image, 保留透明通道=False):
-        image_path = folder_paths.get_annotated_filepath(image)
+        if self._is_empty_selection(image):
+            return (None, None, "")
+        try:
+            image_path = folder_paths.get_annotated_filepath(image)
+        except Exception:
+            return (None, None, "")
+        if not os.path.isfile(image_path):
+            return (None, None, "")
         is_clipspace = "[input]" in str(image)
 
         clipspace_mask_img = None
-        if is_clipspace:
-            clipspace_dir = os.path.dirname(image_path)
-            base_name = os.path.basename(image_path)
-            original_name = base_name.replace("painted-masked", "painted")
-            original_path = os.path.join(clipspace_dir, original_name)
+        try:
+            if is_clipspace:
+                clipspace_dir = os.path.dirname(image_path)
+                base_name = os.path.basename(image_path)
+                original_name = base_name.replace("painted-masked", "painted")
+                original_path = os.path.join(clipspace_dir, original_name)
 
-            if os.path.exists(original_path):
-                img = node_helpers.pillow(Image.open, original_path)
-                clipspace_mask_img = node_helpers.pillow(Image.open, image_path)
-                clipspace_mask_img = self._fix_orientation(clipspace_mask_img)
+                if os.path.exists(original_path):
+                    img = node_helpers.pillow(Image.open, original_path)
+                    clipspace_mask_img = node_helpers.pillow(Image.open, image_path)
+                    clipspace_mask_img = self._fix_orientation(clipspace_mask_img)
+                else:
+                    img = node_helpers.pillow(Image.open, image_path)
             else:
                 img = node_helpers.pillow(Image.open, image_path)
-        else:
-            img = node_helpers.pillow(Image.open, image_path)
+        except Exception:
+            return (None, None, "")
 
         img = self._fix_orientation(img)
 
@@ -208,6 +232,8 @@ class LoadImageGoohai:
             output_images.append(image_tensor)
             output_masks.append(mask.unsqueeze(0))
 
+        if not output_images:
+            return (None, None, filename)
         if len(output_images) > 1 and img.format not in excluded_formats:
             output_image = torch.cat(output_images, dim=0)
             output_mask = torch.cat(output_masks, dim=0)
@@ -219,16 +245,24 @@ class LoadImageGoohai:
 
     @classmethod
     def IS_CHANGED(cls, image, 保留透明通道=False):
-        image_path = folder_paths.get_annotated_filepath(image)
+        if cls._is_empty_selection(image):
+            return "empty"
+        try:
+            image_path = folder_paths.get_annotated_filepath(image)
+        except Exception:
+            return "missing"
+        if not os.path.isfile(image_path):
+            return "missing"
         m = hashlib.sha256()
-        with open(image_path, "rb") as f:
-            m.update(f.read())
+        try:
+            with open(image_path, "rb") as f:
+                m.update(f.read())
+        except OSError:
+            return "missing"
         return m.hexdigest()
 
     @classmethod
     def VALIDATE_INPUTS(cls, image, 保留透明通道=False):
-        if not folder_paths.exists_annotated_filepath(image):
-            return "Invalid image file: {}".format(image)
         return True
 
 

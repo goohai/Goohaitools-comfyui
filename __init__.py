@@ -43,7 +43,7 @@ for file_path in nodes_dir.glob("*.py"):
         print(f"Error loading node module {module_name}: {str(e)}")
         continue
 
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
 
 # 打印加载信息
 print(f'\033[92m[GoohaiTools]\033[0m \033[93m{len(NODE_CLASS_MAPPINGS)} nodes\033[0m loaded | \033[94mColorWidget enabled\033[0m')

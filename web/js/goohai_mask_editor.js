@@ -279,6 +279,7 @@ function injectStyles() {
     style.id = "guhai-mask-editor-style";
     style.textContent = `
 .guhai-mask-root{position:fixed;inset:0;z-index:100000;background:#15171b;color:#f0f2f5;font-family:"PingFang SC","Microsoft YaHei",Arial,sans-serif;display:flex;flex-direction:column}
+.guhai-mask-keyboard-sink{position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;opacity:0;pointer-events:none}
 .guhai-mask-toolbar{min-height:48px;display:flex;align-items:center;gap:14px;padding:8px 12px;background:#202329;border-bottom:1px solid #353a43;box-shadow:0 8px 24px rgba(0,0,0,.26);position:relative}
 .guhai-mask-tools-left,.guhai-mask-tools-right{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
 .guhai-mask-tools-left{justify-content:flex-end;padding-right:220px}
@@ -318,6 +319,7 @@ function injectStyles() {
 }
 `;
     document.head.appendChild(style);
+    installNodes2MaskPreviewObserver();
 }
 
 class GoohaiMaskEditor {
@@ -362,6 +364,7 @@ class GoohaiMaskEditor {
             white: "#fff",
             black: "#000",
         };
+        window._guhaiActiveMaskEditor = this;
         this.build();
         this.bind();
         this.init();
@@ -370,7 +373,9 @@ class GoohaiMaskEditor {
     build() {
         this.root = document.createElement("div");
         this.root.className = "guhai-mask-root";
+        this.root.tabIndex = -1;
         this.root.innerHTML = `
+            <textarea class="guhai-mask-keyboard-sink" aria-hidden="true"></textarea>
             <div class="guhai-mask-toolbar">
                 <div class="guhai-mask-tools-left">
                     <div class="guhai-mask-segment">
@@ -404,6 +409,7 @@ class GoohaiMaskEditor {
                 <div class="guhai-mask-cursor"></div>
             </div>`;
         document.body.appendChild(this.root);
+        this.keyboardSink = this.root.querySelector(".guhai-mask-keyboard-sink");
         this.stage = this.root.querySelector(".guhai-mask-stage");
         this.frame = this.root.querySelector(".guhai-mask-frame");
         this.img = this.root.querySelector("img");
@@ -418,9 +424,17 @@ class GoohaiMaskEditor {
         for (const sw of this.root.querySelectorAll(".guhai-mask-swatch")) {
             sw.style.background = this.colors[sw.dataset.color];
         }
+        this.keyboardSink.focus({ preventScroll: true });
     }
 
     bind() {
+        // Keep keyboard focus on an editable element. ComfyUI deliberately
+        // ignores workflow shortcuts originating from text editors.
+        this.root.addEventListener("mousedown", (e) => {
+            if (e.button !== 0 || e.target === this.keyboardSink) return;
+            e.preventDefault();
+            this.keyboardSink.focus({ preventScroll: true });
+        }, true);
         this.root.addEventListener("click", (e) => {
             const toolBtn = e.target.closest("[data-tool]");
             if (toolBtn) this.setTool(toolBtn.dataset.tool);
@@ -433,6 +447,7 @@ class GoohaiMaskEditor {
             if (act === "clear") this.clear();
             if (act === "cancel") this.close();
             if (act === "save") this.save();
+            this.keyboardSink.focus({ preventScroll: true });
         });
         this.stage.addEventListener("mousedown", (e) => this.pointerDown(e));
         window.addEventListener("mousemove", this._move = (e) => this.pointerMove(e), true);
@@ -440,7 +455,8 @@ class GoohaiMaskEditor {
         this.stage.addEventListener("mouseleave", () => { this.cursor.style.display = "none"; });
         this.stage.addEventListener("contextmenu", (e) => e.preventDefault());
         this.stage.addEventListener("wheel", this._wheel = (e) => this.wheel(e), { passive: false });
-        window.addEventListener("keydown", this._keyDown = (e) => this.keyDown(e), true);
+        // Keyboard shortcuts are routed by installMaskEditorHotkey(). Keeping
+        // a second window keydown listener here would apply Ctrl+Z twice.
         window.addEventListener("keyup", this._keyUp = (e) => this.keyUp(e), true);
         window.addEventListener("resize", this._resize = () => this.redrawMarquee());
     }
@@ -576,22 +592,27 @@ class GoohaiMaskEditor {
     }
 
     keyDown(e) {
-        if (this.isEditable(e.target)) return;
+        if (this.isEditable(e.target) && e.target !== this.keyboardSink) return;
         const ctrl = e.ctrlKey || e.metaKey;
         const key = e.key;
-        if (ctrl && !e.shiftKey && key.toLowerCase() === "z") { e.preventDefault(); this.undo(); return; }
-        if (ctrl && e.shiftKey && (key.toLowerCase() === "z" || key.toLowerCase() === "y")) { e.preventDefault(); this.redoAction(); return; }
-        if (ctrl && !e.shiftKey && key.toLowerCase() === "i") { e.preventDefault(); this.invert(); return; }
-        if (!ctrl && key.toLowerCase() === "b") { e.preventDefault(); this.setTool("brush"); return; }
-        if (!ctrl && key.toLowerCase() === "e") { e.preventDefault(); this.setTool("eraser"); return; }
-        if (!ctrl && key.toLowerCase() === "m") { e.preventDefault(); this.setTool("marquee"); return; }
-        if (!ctrl && key.toLowerCase() === "x") { e.preventDefault(); this.clear(); return; }
-        if (!ctrl && key === "Enter") { e.preventDefault(); this.save(); return; }
-        if (!ctrl && key === "Escape") { e.preventDefault(); this.close(); return; }
-        if (!ctrl && (key === "[" || key === "\u3010")) { e.preventDefault(); this.setBrushSize(this.brushSize - 5); return; }
-        if (!ctrl && (key === "]" || key === "\u3011")) { e.preventDefault(); this.setBrushSize(this.brushSize + 5); return; }
-        if (key === " ") { e.preventDefault(); this.spaceDown = true; this.updateCursor(); }
-        if (key === "Alt") { e.preventDefault(); this.altDown = true; this.updateCursor(); }
+        const consume = () => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation?.();
+        };
+        if (ctrl && !e.shiftKey && key.toLowerCase() === "z") { consume(); this.undo(); return; }
+        if (ctrl && e.shiftKey && (key.toLowerCase() === "z" || key.toLowerCase() === "y")) { consume(); this.redoAction(); return; }
+        if (ctrl && !e.shiftKey && key.toLowerCase() === "i") { consume(); this.invert(); return; }
+        if (!ctrl && key.toLowerCase() === "b") { consume(); this.setTool("brush"); return; }
+        if (!ctrl && key.toLowerCase() === "e") { consume(); this.setTool("eraser"); return; }
+        if (!ctrl && key.toLowerCase() === "m") { consume(); this.setTool("marquee"); return; }
+        if (!ctrl && key.toLowerCase() === "x") { consume(); this.clear(); return; }
+        if (!ctrl && key === "Enter") { consume(); this.save(); return; }
+        if (!ctrl && key === "Escape") { consume(); this.close(); return; }
+        if (!ctrl && (key === "[" || key === "\u3010")) { consume(); this.setBrushSize(this.brushSize - 5); return; }
+        if (!ctrl && (key === "]" || key === "\u3011")) { consume(); this.setBrushSize(this.brushSize + 5); return; }
+        if (key === " ") { consume(); this.spaceDown = true; this.updateCursor(); }
+        if (key === "Alt") { consume(); this.altDown = true; this.updateCursor(); }
         if (key === "Shift" && !this.shiftDown) {
             this.shiftDown = true;
             if (this.tool !== "marquee") {
@@ -605,7 +626,7 @@ class GoohaiMaskEditor {
     }
 
     keyUp(e) {
-        if (this.isEditable(e.target)) return;
+        if (this.isEditable(e.target) && e.target !== this.keyboardSink) return;
         if (e.key === " ") { this.spaceDown = false; this.updateCursor(); }
         if (e.key === "Alt") { this.altDown = false; this.updateCursor(); }
         if (e.key === "Shift") {
@@ -802,7 +823,6 @@ class GoohaiMaskEditor {
     clear() {
         const ctx = this.paint.getContext("2d");
         ctx.clearRect(0, 0, this.paint.width, this.paint.height);
-        this.restoreBaseAlphaPaint();
         this.clearMarquee();
         this.pushHistory();
     }
@@ -1141,15 +1161,50 @@ class GoohaiMaskEditor {
             const sourceImage = this.sourceImage || this.img;
             const editImage = this.editImageCanvas || this.img;
             const sourceUrl = this.imageUrl;
-            const paint = this.paint;
+            // Freeze the exact editor result before starting any async upload.
+            // This prevents a workflow undo/configure event from changing the
+            // canvas or node state while the save task is being prepared.
+            const paint = document.createElement("canvas");
+            paint.width = this.paint.width;
+            paint.height = this.paint.height;
+            paint.getContext("2d").drawImage(this.paint, 0, 0);
             const savePaint = document.createElement("canvas");
             savePaint.width = paint.width;
             savePaint.height = paint.height;
             const savePaintCtx = savePaint.getContext("2d");
             savePaintCtx.drawImage(paint, 0, 0);
-            if (this.baseAlphaPaint) savePaintCtx.drawImage(this.baseAlphaPaint, 0, 0);
+            // For the official loader, preserve transparent source pixels.
+            // The Goohai loader's mask is editor state and must never be
+            // reintroduced after Ctrl+Z/Clear.
+            if (this.preserveRgbUnderMask && this.baseAlphaPaint) {
+                savePaintCtx.drawImage(this.baseAlphaPaint, 0, 0);
+            }
             const natW = this.natural.w || savePaint.width;
             const natH = this.natural.h || savePaint.height;
+            // Build the green composite immediately, independently of the
+            // uploads. The legacy canvas can display this before the image
+            // widget points at the black alpha-mask file.
+            const previewTask = (async () => {
+                await nextFrame();
+                const preview = document.createElement("canvas");
+                preview.width = natW;
+                preview.height = natH;
+                const pctx = preview.getContext("2d");
+                pctx.drawImage(sourceImage || editImage, 0, 0, natW, natH);
+                const green = document.createElement("canvas");
+                green.width = natW;
+                green.height = natH;
+                const gctx = green.getContext("2d");
+                gctx.imageSmoothingEnabled = false;
+                gctx.drawImage(savePaint, 0, 0, natW, natH);
+                gctx.globalCompositeOperation = "source-in";
+                gctx.fillStyle = "#2ad270";
+                gctx.fillRect(0, 0, natW, natH);
+                pctx.globalAlpha = 0.5;
+                pctx.drawImage(green, 0, 0);
+                pctx.globalAlpha = 1;
+                return await canvasToObjectUrl(preview, "image/jpeg", 0.88);
+            })();
             const task = (async () => {
                 await nextFrame();
                 const ts = Date.now();
@@ -1202,30 +1257,9 @@ class GoohaiMaskEditor {
 
                 const uploadedName = uploadedMasked.name || uploadedMasked.filename || `clipspace-painted-masked-${ts}.png`;
                 const uploadedPath = `${uploadedMasked.subfolder ? `${uploadedMasked.subfolder}/` : ""}${uploadedName} [input]`;
-                const previewTask = (async () => {
-                    await nextFrame();
-                    const preview = document.createElement("canvas");
-                    preview.width = natW;
-                    preview.height = natH;
-                    const pctx = preview.getContext("2d");
-                    pctx.drawImage(sourceImage || editImage, 0, 0, natW, natH);
-                    const green = document.createElement("canvas");
-                    green.width = natW;
-                    green.height = natH;
-                    const gctx = green.getContext("2d");
-                    gctx.imageSmoothingEnabled = false;
-                    gctx.drawImage(savePaint, 0, 0, natW, natH);
-                    gctx.globalCompositeOperation = "source-in";
-                    gctx.fillStyle = "#2ad270";
-                    gctx.fillRect(0, 0, natW, natH);
-                    pctx.globalAlpha = 0.5;
-                    pctx.drawImage(green, 0, 0);
-                    pctx.globalAlpha = 1;
-                    return await canvasToObjectUrl(preview, "image/jpeg", 0.88);
-                })();
                 return { value: uploadedPath, previewTask };
             })();
-            this.onSave(task);
+            this.onSave(task, previewTask);
             this.close();
         } catch (err) {
             alert(`\u4fdd\u5b58\u906e\u7f69\u5931\u8d25: ${err?.message || err}`);
@@ -1234,9 +1268,9 @@ class GoohaiMaskEditor {
 
     close() {
         if (this.raf) cancelAnimationFrame(this.raf);
+        if (window._guhaiActiveMaskEditor === this) window._guhaiActiveMaskEditor = null;
         window.removeEventListener("mousemove", this._move, true);
         window.removeEventListener("mouseup", this._up, true);
-        window.removeEventListener("keydown", this._keyDown, true);
         window.removeEventListener("keyup", this._keyUp, true);
         window.removeEventListener("resize", this._resize);
         this.root.remove();
@@ -1253,13 +1287,107 @@ function hideBulkyWidgets(node) {
         if (w.name === "upload" || w.name === "guhai_mask_editor" || isTransparentToggle) {
             w.hidden = true;
             w.computeSize = () => [0, -4];
-            w.serialize = false;
+            if (!isTransparentToggle) w.serialize = false;
         }
     }
 }
 
 function findImageWidget(node) {
     return node.widgets?.find((w) => w.name === "image");
+}
+
+function isEmptyImageValue(value) {
+    const normalized = String(value ?? "").trim();
+    return !normalized || normalized === "无";
+}
+
+function keepEmptyLoadImageNodeInteractive(node) {
+    const imageWidget = findImageWidget(node);
+    if (!imageWidget || !isEmptyImageValue(imageWidget.value)) return;
+    node.imgs = null;
+    node.imageIndex = null;
+    const width = Math.max(350, Number(node.size?.[0]) || 0);
+    const height = Math.max(500, Number(node.size?.[1]) || 0);
+    if (node.size?.[0] !== width || node.size?.[1] !== height) {
+        node.setSize?.([width, height]);
+        node.size = [width, height];
+    }
+    node.setDirtyCanvas(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function protectNodeValueDuringMaskEdit(node, configure) {
+    const imageWidget = findImageWidget(node);
+    const editingValue = node?._guhaiMaskEditorActive && imageWidget
+        ? imageWidget.value
+        : undefined;
+    const editingProperty = node?._guhaiMaskEditorActive
+        ? node.properties?.guhaiImageValue
+        : undefined;
+    configure?.();
+    if (editingValue !== undefined && node._guhaiMaskEditorActive && imageWidget) {
+        // LiteGraph workflow undo can call configure() while the editor is
+        // open. Keep that operation from replacing the value being edited.
+        imageWidget.value = editingValue;
+        node.properties ||= {};
+        node.properties.guhaiImageValue = editingProperty ?? String(editingValue);
+    }
+}
+
+function persistLoadImageState(node) {
+    const imageWidget = findImageWidget(node);
+    if (!imageWidget) return;
+    node.properties ||= {};
+    if (imageWidget.value !== undefined && imageWidget.value !== null) {
+        node.properties.guhaiImageValue = String(imageWidget.value);
+    }
+    const transparentWidget = findTransparentWidget(node);
+    if (transparentWidget) {
+        node.properties.guhaiPreserveAlpha = !!transparentWidget.value;
+    }
+    if (imageWidget.value && imageWidget.options?.values && !imageWidget.options.values.includes(imageWidget.value)) {
+        imageWidget.options.values.push(imageWidget.value);
+    }
+}
+
+function restoreLoadImageState(node) {
+    // Do not let ComfyUI's workflow undo/configure cycle overwrite the value
+    // while the mask editor is open. The editor owns the pending result until
+    // its save callback finishes.
+    if (node?._guhaiMaskEditorActive) return;
+    const imageWidget = findImageWidget(node);
+    if (!imageWidget) return;
+    const saved = node.properties?.guhaiImageValue;
+    if (saved && (!imageWidget.value || imageWidget.value === "无")) imageWidget.value = saved;
+    const transparentWidget = findTransparentWidget(node);
+    if (transparentWidget) {
+        const hasSavedMode = Object.prototype.hasOwnProperty.call(node.properties || {}, "guhaiPreserveAlpha");
+        transparentWidget.value = hasSavedMode ? !!node.properties.guhaiPreserveAlpha : false;
+    }
+    persistLoadImageState(node);
+}
+
+function installLoadImagePersistence(node) {
+    const imageWidget = findImageWidget(node);
+    if (!imageWidget || imageWidget._guhaiPersistWrapped) return;
+    const originalCallback = imageWidget.callback;
+    imageWidget.callback = function () {
+        const skipOriginalPreview = !!node._guhaiSkipOriginalImageCallback;
+        const result = skipOriginalPreview ? undefined : originalCallback?.apply(this, arguments);
+        persistLoadImageState(node);
+        if (isEmptyImageValue(imageWidget.value)) {
+            keepEmptyLoadImageNodeInteractive(node);
+            // The stock image widget can finish clearing its preview after the
+            // callback returns. Re-assert the empty interactive state after
+            // those asynchronous preview updates have settled.
+            requestAnimationFrame(() => keepEmptyLoadImageNodeInteractive(node));
+            setTimeout(() => keepEmptyLoadImageNodeInteractive(node), 100);
+            setTimeout(() => keepEmptyLoadImageNodeInteractive(node), 500);
+        }
+        return result;
+    };
+    imageWidget._guhaiPersistWrapped = true;
+    persistLoadImageState(node);
 }
 
 function nodeHasMask(node) {
@@ -1331,24 +1459,30 @@ function drawCircleIcon(ctx, x, y, label, hover) {
     ctx.restore();
 }
 
-function drawToolbarIcon(ctx, x, y, label, hover, active = true, tone = "cyan") {
+function getNodeButtonFill(node) {
+    return node?.bgcolor || node?.color || "rgba(39, 45, 55, 0.94)";
+}
+
+function drawToolbarIcon(ctx, x, y, label, hover, active = true, fillColor) {
     ctx.save();
-    ctx.shadowColor = "rgba(0,0,0,0.35)";
-    ctx.shadowBlur = hover ? 10 : 5;
-    const activeFill = tone === "dark"
-        ? (hover ? "rgba(69, 76, 88, 0.96)" : "rgba(43, 48, 58, 0.94)")
-        : (hover ? "#45c7bf" : "rgba(34, 138, 134, 0.94)");
-    ctx.fillStyle = active ? activeFill : (hover ? "#5b6470" : "rgba(54, 60, 70, 0.88)");
-    ctx.strokeStyle = active ? (tone === "dark" ? "#8f98a6" : "#b6fffb") : "#9aa2ad";
+    ctx.shadowColor = "rgba(0,0,0,0.28)";
+    ctx.shadowBlur = hover ? 7 : 4;
+    ctx.fillStyle = active ? "rgba(31, 111, 108, 0.94)" : (fillColor || "rgba(39, 45, 55, 0.94)");
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.arc(x, y, 18, 0, Math.PI * 2);
     ctx.fill();
+    if (hover) {
+        const alpha = active ? 0.14 : 0.08;
+        ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+        ctx.fill();
+    }
+    ctx.strokeStyle = active ? "#72aaa8" : "#788391";
     ctx.stroke();
     ctx.shadowBlur = 0;
-    ctx.fillStyle = "#ffffff";
-    ctx.shadowColor = "rgba(0,0,0,0.55)";
-    ctx.shadowBlur = 2;
+    ctx.fillStyle = "#c1c5cd";
+    ctx.shadowColor = "rgba(0,0,0,0.42)";
+    ctx.shadowBlur = 1.5;
     ctx.font = label.length > 3 ? "bold 9px sans-serif" : "bold 11px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -1371,9 +1505,10 @@ function drawNodeMaskButtons(ctx, node, width, cy, hover) {
     const transparentWidget = findTransparentWidget(node);
     const transparentOn = !!transparentWidget?.value;
     const hasMask = nodeHasMask(node);
-    drawToolbarIcon(ctx, xs[0], cy, "\u4e0a\u4f20", hover === "upload", true, "dark");
-    drawToolbarIcon(ctx, xs[1], cy, transparentOn ? "RGBA" : "RGB", hover === "transparent", true, transparentOn ? "cyan" : "dark");
-    drawToolbarIcon(ctx, xs[2], cy, "\u906e\u7f69", hover === "mask", true, hasMask ? "cyan" : "dark");
+    const fillColor = getNodeButtonFill(node);
+    drawToolbarIcon(ctx, xs[0], cy, "\u4e0a\u4f20", hover === "upload", false, fillColor);
+    drawToolbarIcon(ctx, xs[1], cy, transparentOn ? "RGBA" : "RGB", hover === "transparent", transparentOn, fillColor);
+    drawToolbarIcon(ctx, xs[2], cy, "\u906e\u7f69", hover === "mask", hasMask, fillColor);
 }
 
 function showNodeTooltip(text, event) {
@@ -1440,7 +1575,164 @@ function setNodePreview(node, dataUrl) {
     apply();
     setTimeout(apply, 250);
     setTimeout(apply, 900);
+    setTimeout(() => refreshNodes2MaskPreviews(), 100);
+    setTimeout(() => refreshNodes2MaskPreviews(), 1000);
 }
+
+function waitForPreviewImage(img) {
+    if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        img.addEventListener("load", resolve, { once: true });
+        img.addEventListener("error", reject, { once: true });
+    });
+}
+
+function refreshNodes2MaskPreviews(root = document) {
+    const images = root.querySelectorAll?.('img[data-testid="main-image"]') || [];
+    for (const img of images) {
+        const parent = img.parentElement;
+        if (!parent) continue;
+
+        // Nodes 2.0 keeps the Vue preview on the original image even after the
+        // underlying widget has changed to a painted-masked clipspace value.
+        // Resolve the real widget through the DOM node id instead of trusting
+        // the main image src, which is only reliable in the legacy renderer.
+        const nodeId = img.closest?.("[data-node-id]")?.dataset?.nodeId;
+        const node = nodeId != null
+            ? (app.graph?.getNodeById?.(nodeId) || app.graph?.getNodeById?.(Number(nodeId)))
+            : null;
+        const widgetRoot = img.closest?.("[data-node-id]")?.querySelector?.('[data-testid="node-widgets"]');
+        const renderedMaskedValue = [...(widgetRoot?.querySelectorAll?.("button, span") || [])]
+            .map((element) => String(element.textContent || "").trim())
+            .find((value) => value.includes("painted-masked") || value.includes("clipspace-mask-")) || "";
+        const widgetValue = String(findImageWidget(node)?.value || renderedMaskedValue);
+        const src = img.currentSrc || img.src || "";
+        const maskedValue = widgetValue.includes("painted-masked") || widgetValue.includes("clipspace-mask-")
+            ? widgetValue
+            : (src.includes("painted-masked") || src.includes("clipspace-mask-") ? src : "");
+
+        if (!maskedValue) {
+            parent.querySelector(':scope > img[data-guhai-nodes2-original="true"]')?.remove();
+            parent.querySelector(':scope > img[data-guhai-nodes2-green="true"]')?.remove();
+            parent.querySelector(':scope > img[data-guhai-nodes2-masked="true"]')?.remove();
+            img.style.removeProperty("z-index");
+            img._guhaiNodes2MaskKey = null;
+            continue;
+        }
+
+        let maskedUrl;
+        let originalUrl;
+        if (maskedValue === widgetValue) {
+            const sources = getEditorSources(maskedValue);
+            maskedUrl = imageUrlFromParts(parseImageValue(maskedValue));
+            originalUrl = sources.imageUrl;
+        } else {
+            maskedUrl = new URL(src, location.href).toString();
+            const parsedUrl = new URL(maskedUrl, location.href);
+            const maskedName = parsedUrl.searchParams.get("filename") || "";
+            parsedUrl.searchParams.set("filename", maskedName
+                .replace("painted-masked", "painted")
+                .replace("clipspace-mask-", "clipspace-painted-"));
+            originalUrl = parsedUrl.toString();
+        }
+
+        const key = `${cacheKeyForUrl(maskedUrl)}|${cacheKeyForUrl(originalUrl)}`;
+        if (img._guhaiNodes2MaskKey === key
+            && parent.querySelector(':scope > img[data-guhai-nodes2-masked="true"]')) continue;
+        img._guhaiNodes2MaskKey = key;
+
+        let original = parent.querySelector(':scope > img[data-guhai-nodes2-original="true"]');
+        if (!original) {
+            original = document.createElement("img");
+            original.dataset.guhaiNodes2Original = "true";
+            original.alt = "遮罩原图预览";
+            original.draggable = false;
+            original.className = img.className;
+            parent.insertBefore(original, img);
+        }
+        original.style.visibility = "hidden";
+        original.src = originalUrl;
+        let green = parent.querySelector(':scope > img[data-guhai-nodes2-green="true"]');
+        if (!green) {
+            green = document.createElement("img");
+            green.dataset.guhaiNodes2Green = "true";
+            green.alt = "遮罩绿色叠加";
+            green.draggable = false;
+            green.className = img.className;
+            green.style.filter = "brightness(0) saturate(100%) invert(72%) sepia(64%) saturate(550%) hue-rotate(93deg) brightness(92%) contrast(91%)";
+            green.style.opacity = "0.5";
+            green.style.zIndex = "1";
+            parent.insertBefore(green, img);
+        }
+        green.style.visibility = "hidden";
+        green.src = originalUrl;
+        let masked = parent.querySelector(':scope > img[data-guhai-nodes2-masked="true"]');
+        if (!masked) {
+            masked = document.createElement("img");
+            masked.dataset.guhaiNodes2Masked = "true";
+            masked.alt = "遮罩透明预览";
+            masked.draggable = false;
+            masked.className = img.className;
+            masked.style.zIndex = "2";
+            parent.insertBefore(masked, img);
+        }
+        masked.style.visibility = "hidden";
+        masked.src = maskedUrl;
+        original.style.zIndex = "0";
+        img.style.removeProperty("z-index");
+
+        // Do not expose the layers one by one. The green-tinted original often
+        // finishes before the transparent mask and otherwise appears as a
+        // brief full green rectangle, especially while Nodes 2.0 remounts.
+        Promise.all([
+            waitForPreviewImage(original),
+            waitForPreviewImage(green),
+            waitForPreviewImage(masked),
+        ]).then(() => {
+            if (img._guhaiNodes2MaskKey !== key || !img.isConnected) return;
+            requestAnimationFrame(() => {
+                if (img._guhaiNodes2MaskKey !== key || !img.isConnected) return;
+                original.style.removeProperty("visibility");
+                green.style.removeProperty("visibility");
+                masked.style.removeProperty("visibility");
+                img.style.zIndex = "-1";
+            });
+        }).catch(() => {
+            if (img._guhaiNodes2MaskKey !== key) return;
+            img._guhaiNodes2MaskKey = null;
+            img.style.removeProperty("z-index");
+        });
+    }
+}
+
+function installNodes2MaskPreviewObserver() {
+    if (window._guhaiNodes2MaskPreviewObserver) return;
+    let scheduled = false;
+    const refresh = () => {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => {
+            scheduled = false;
+            refreshNodes2MaskPreviews();
+        });
+    };
+    const observer = new MutationObserver(refresh);
+    observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["src"],
+    });
+    window._guhaiNodes2MaskPreviewObserver = observer;
+    refresh();
+    // Nodes 2.0 may reuse Vue component instances without mutating the img
+    // element itself. A lightweight periodic scan covers those updates.
+    window._guhaiNodes2MaskPreviewTimer = setInterval(refresh, 1500);
+}
+
+// Install independently of ComfyUI's extension lifecycle. Nodes 2.0 can skip
+// duplicate extension init hooks while hot-reloading custom-node modules.
+installNodes2MaskPreviewObserver();
 
 async function waitForPendingMaskSaves() {
     const tasks = [...pendingMaskSaves];
@@ -1556,8 +1848,24 @@ function clearMaskForNode(node) {
 
 function installMaskEditorHotkey() {
     if (window._guhaiMaskEditorHotkeyInstalled) return;
-    window.addEventListener("keydown", async (e) => {
-        if (document.querySelector(".guhai-mask-root")) return;
+    document.addEventListener("keydown", async (e) => {
+        const activeEditor = window._guhaiActiveMaskEditor;
+        if (activeEditor) {
+            const key = String(e.key || "").toLowerCase();
+            const ctrl = e.ctrlKey || e.metaKey;
+            const isUndo = ctrl && !e.shiftKey && (key === "z" || e.keyCode === 90);
+            const isRedo = ctrl && e.shiftKey && (key === "z" || key === "y" || e.keyCode === 90 || e.keyCode === 89);
+            if (isUndo || isRedo) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation?.();
+                if (isUndo) activeEditor.undo();
+                else activeEditor.redoAction();
+                return;
+            }
+            activeEditor.keyDown(e);
+            return;
+        }
         if (e.repeat) return;
         const isZ = isZKeyEvent(e);
         const isX = isXKeyEvent(e);
@@ -1572,7 +1880,7 @@ function installMaskEditorHotkey() {
         } else {
             openEditorForNode(node);
         }
-    }, true);
+    }, { capture: true, passive: false });
     window._guhaiMaskEditorHotkeyInstalled = true;
 }
 
@@ -1588,6 +1896,7 @@ async function uploadSelectedImageForNode(node, file) {
     const imageWidget = findImageWidget(node);
     if (!imageWidget) return;
     imageWidget.value = value;
+    persistLoadImageState(node);
     if (imageWidget.options?.values && !imageWidget.options.values.includes(value)) {
         imageWidget.options.values.push(value);
     }
@@ -1598,6 +1907,60 @@ async function uploadSelectedImageForNode(node, file) {
     prewarmEditorForNode(node);
     node.setDirtyCanvas(true, true);
     app.graph?.change?.();
+}
+
+function isImageDropFile(file) {
+    if (!file) return false;
+    if (String(file.type || "").toLowerCase().startsWith("image/")) return true;
+    return /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|tiff?|webp)$/i.test(String(file.name || ""));
+}
+
+function getLoadImageGoohaiAtDropEvent(event) {
+    try {
+        const canvas = app.canvas;
+        if (!canvas?.graph || typeof canvas.adjustMouseEvent !== "function") return null;
+        canvas.adjustMouseEvent(event);
+        const node = canvas.graph.getNodeOnPos?.(event.canvasX, event.canvasY);
+        return isLoadImageGoohaiNode(node) ? node : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function installCanvasImageDropFallback() {
+    if (window._guhaiCanvasImageDropFallbackInstalled) return;
+
+    const isFileDrag = (dataTransfer) => {
+        const items = [...(dataTransfer?.items || [])];
+        const types = [...(dataTransfer?.types || [])].map((type) => String(type).toLowerCase());
+        return items.some((item) => item.kind === "file")
+            || (dataTransfer?.files?.length || 0) > 0
+            || types.includes("files");
+    };
+
+    document.addEventListener("dragover", (event) => {
+        if (!isFileDrag(event.dataTransfer)) return;
+        if (!getLoadImageGoohaiAtDropEvent(event)) return;
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    }, { capture: true, passive: false });
+
+    document.addEventListener("drop", (event) => {
+        const node = getLoadImageGoohaiAtDropEvent(event);
+        if (!node) return;
+        const file = event.dataTransfer?.files?.[0];
+        if (!isImageDropFile(file)) return;
+        // Own the drop only for our node. This bypasses node callback races
+        // while leaving ComfyUI's official LoadImage behavior untouched.
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        uploadSelectedImageForNode(node, file).catch((err) => {
+            alert(`\u4e0a\u4f20\u56fe\u50cf\u5931\u8d25: ${err?.message || err}`);
+        });
+    }, { capture: true, passive: false });
+
+    window._guhaiCanvasImageDropFallbackInstalled = true;
 }
 
 function openUploadForNode(node) {
@@ -1625,6 +1988,11 @@ function installFloatingButtons(node) {
     document.querySelectorAll(".guhai-load-toolbar").forEach((el) => el.remove());
     hideBulkyWidgets(node);
 
+    // Keep a real node hit area even when the image widget has no preview.
+    // This also prevents an empty "无" selection from collapsing the node.
+    const ensureInteractiveSize = () => keepEmptyLoadImageNodeInteractive(node);
+    ensureInteractiveSize();
+
     const controlsWidget = node.addCustomWidget({
         name: "guhai_mask_icon_controls",
         type: "guhai_mask_icon_controls",
@@ -1641,15 +2009,18 @@ function installFloatingButtons(node) {
             ];
             node._guhaiMaskButtons = this._buttons;
             node._guhaiControlsWidgetDrawAt = performance.now();
-            drawToolbarIcon(ctx, xs[0], cy, "\u4e0a\u4f20", this._hover === "upload", true, "dark");
-            drawToolbarIcon(ctx, xs[1], cy, transparentOn ? "RGBA" : "RGB", this._hover === "transparent", true, transparentOn ? "cyan" : "dark");
-            drawToolbarIcon(ctx, xs[2], cy, "\u906e\u7f69", this._hover === "mask", true, nodeHasMask(node) ? "cyan" : "dark");
+            const fillColor = getNodeButtonFill(node);
+            drawToolbarIcon(ctx, xs[0], cy, "\u4e0a\u4f20", this._hover === "upload", false, fillColor);
+            drawToolbarIcon(ctx, xs[1], cy, transparentOn ? "RGBA" : "RGB", this._hover === "transparent", transparentOn, fillColor);
+            drawToolbarIcon(ctx, xs[2], cy, "\u906e\u7f69", this._hover === "mask", nodeHasMask(node), fillColor);
         },
         mouse(event, pos, node) {
             let hit = null;
             for (const b of this._buttons || []) {
                 if (Math.hypot(pos[0] - b.x, pos[1] - b.y) <= b.r) hit = b.kind;
             }
+            // Do not consume right-clicks; LiteGraph must open the node menu.
+            if (event?.button === 2 || event?.which === 3) return false;
             const tooltip = hit ? (hit === "upload" ? "\u4e0a\u4f20\u56fe\u50cf" : hit === "transparent" ? "\u4fdd\u7559\u900f\u660e\u901a\u9053" : "\u906e\u7f69\u7f16\u8f91") : "";
             showNodeTooltip(tooltip, event);
             if (event.type === "pointermove" || event.type === "mousemove") {
@@ -1668,6 +2039,7 @@ function installFloatingButtons(node) {
                     if (transparentWidget) {
                         transparentWidget.value = !transparentWidget.value;
                         transparentWidget.callback?.(transparentWidget.value);
+                        persistLoadImageState(node);
                         node.setDirtyCanvas(true, true);
                         app.graph?.change?.();
                     }
@@ -1691,6 +2063,7 @@ function installFloatingButtons(node) {
 
     const origDrawForeground = node.onDrawForeground;
     node.onDrawForeground = function (ctx) {
+        ensureInteractiveSize();
         origDrawForeground?.apply(this, arguments);
         hideBulkyWidgets(this);
     };
@@ -1721,6 +2094,8 @@ function installFloatingButtons(node) {
 
     const origMouseDown = node.onMouseDown;
     node.onMouseDown = function (event, pos) {
+        // The node's context menu belongs to LiteGraph, not the custom buttons.
+        if (event?.button === 2) return origMouseDown?.apply(this, arguments);
         let hit = null;
         for (const b of this._guhaiMaskButtons || []) {
             if (Math.hypot(pos[0] - b.x, pos[1] - b.y) <= b.r) hit = b.kind;
@@ -1734,6 +2109,7 @@ function installFloatingButtons(node) {
                 if (transparentWidget) {
                     transparentWidget.value = !transparentWidget.value;
                     transparentWidget.callback?.(transparentWidget.value);
+                    persistLoadImageState(this);
                     this.setDirtyCanvas(true, true);
                     app.graph?.change?.();
                 }
@@ -1746,6 +2122,32 @@ function installFloatingButtons(node) {
     };
 
     removeNodeToolbar(node);
+}
+
+function initializeLoadImageNode(node, { floating = false } = {}) {
+    let attempts = 0;
+    const run = () => {
+        attempts += 1;
+        const imageWidget = findImageWidget(node);
+        if (!imageWidget && attempts < 20) {
+            setTimeout(run, 100);
+            return;
+        }
+        if (!imageWidget) return;
+        restoreLoadImageState(node);
+        installLoadImagePersistence(node);
+        installImageWidgetPrewarm(node);
+        if (floating) {
+            hideBulkyWidgets(node);
+            installFloatingButtons(node);
+        }
+        prewarmEditorForNode(node);
+        refreshClipspacePreview(node);
+        setTimeout(() => refreshNodes2MaskPreviews(), 100);
+        setTimeout(() => refreshNodes2MaskPreviews(), 1200);
+        node.setDirtyCanvas(true, true);
+    };
+    requestAnimationFrame(run);
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -1765,38 +2167,78 @@ function openEditorForNode(node) {
         return;
     }
     const sources = getEditorSources(imageWidget.value);
-    new GoohaiMaskEditor({
+    const nodeId = node.id;
+    const currentNode = () => app.graph?.getNodeById?.(nodeId) || node;
+    // Mark the node before constructing the editor. A workflow undo/configure
+    // event must not restore the old painted-masked value while editing.
+    node._guhaiMaskEditorActive = true;
+    let editor;
+    editor = new GoohaiMaskEditor({
         imageUrl: sources.imageUrl,
         maskUrl: sources.maskUrl,
         maskMode: sources.maskMode,
         preserveRgbUnderMask: isOfficialLoadImageNode(node),
-        onSave(saveTask) {
-            node._guhaiMaskSaving = true;
-            node.setDirtyCanvas(true, true);
+        onSave(saveTask, immediatePreviewTask) {
+            let targetNode = currentNode();
+            targetNode._guhaiMaskEditorSavePending = true;
+            targetNode._guhaiMaskSaving = true;
+            targetNode.setDirtyCanvas(true, true);
+            // Prime the legacy preview while uploads are still running. By the
+            // time the widget callback updates its value, this image is loaded
+            // and can be restored in the same frame, avoiding a black flash.
+            if (immediatePreviewTask) {
+                Promise.resolve(immediatePreviewTask)
+                    .then((url) => {
+                        targetNode = currentNode();
+                        if (url) setNodePreview(targetNode, url);
+                    })
+                    .catch(() => {});
+            }
             const pending = Promise.resolve(saveTask).then(({ value, previewDataUrl, previewTask }) => {
-                imageWidget.value = value;
-                if (imageWidget.options?.values && !imageWidget.options.values.includes(value)) {
-                    imageWidget.options.values.push(value);
+                targetNode = currentNode();
+                const targetWidget = findImageWidget(targetNode);
+                if (!targetWidget) throw new Error("加载图像节点已不存在");
+                targetWidget.value = value;
+                persistLoadImageState(targetNode);
+                if (targetWidget.options?.values && !targetWidget.options.values.includes(value)) {
+                    targetWidget.options.values.push(value);
                 }
-                if (previewDataUrl) setNodePreview(node, previewDataUrl);
+                // Persist the saved value without asking the stock legacy
+                // image widget to load the black alpha-mask as a preview.
+                targetNode._guhaiSkipOriginalImageCallback = true;
+                try {
+                    if (typeof targetWidget.callback === "function") targetWidget.callback(value);
+                } finally {
+                    targetNode._guhaiSkipOriginalImageCallback = false;
+                }
+                if (previewDataUrl) setNodePreview(targetNode, previewDataUrl);
                 if (previewTask) {
                     Promise.resolve(previewTask)
-                        .then((url) => url && setNodePreview(node, url))
+                        .then((url) => url && setNodePreview(targetNode, url))
                         .catch(() => {});
                 }
-                prewarmEditorForNode(node);
+                prewarmEditorForNode(targetNode);
                 app.graph?.change?.();
+                setTimeout(() => refreshNodes2MaskPreviews(), 100);
+                setTimeout(() => refreshNodes2MaskPreviews(), 1200);
             }).catch((err) => {
                 alert(`\u4fdd\u5b58\u906e\u7f69\u5931\u8d25: ${err?.message || err}`);
             }).finally(() => {
-                node._guhaiMaskSaving = false;
+                targetNode = currentNode();
+                targetNode._guhaiMaskEditorSavePending = false;
+                targetNode._guhaiMaskEditorActive = null;
+                targetNode._guhaiMaskSaving = false;
                 pendingMaskSaves.delete(pending);
-                node.setDirtyCanvas(true, true);
+                targetNode.setDirtyCanvas(true, true);
                 app.graph?.setDirtyCanvas?.(true, true);
             });
             pendingMaskSaves.add(pending);
         },
+        onClose() {
+            if (!node._guhaiMaskEditorSavePending) node._guhaiMaskEditorActive = null;
+        },
     });
+    node._guhaiMaskEditorActive = editor;
 }
 
 async function refreshClipspacePreview(node) {
@@ -1849,34 +2291,57 @@ app.registerExtension({
     name: EXT_NAME,
     init() {
         injectStyles();
-        installQueueWaiter();
         installMaskEditorHotkey();
+        installNodes2MaskPreviewObserver();
+        installCanvasImageDropFallback();
+        // Nodes 2.0 initializes the graph after extensions. Queue hooks must
+        // not prevent the independent preview/keyboard features from loading.
+        setTimeout(() => {
+            try { installQueueWaiter(); } catch (_) {
+                setTimeout(() => {
+                    try { installQueueWaiter(); } catch (_) {}
+                }, 1000);
+            }
+        }, 0);
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== "LoadImageGoohai" && nodeData.name !== "LoadImage") return;
+        if (nodeData.name === "LoadImageGoohai") {
+            // Initial size for newly-created nodes; users can still resize
+            // them freely and imported workflow dimensions remain untouched.
+            nodeData.size = [350, 500];
+        }
         installMaskEditorMenu(nodeType);
         if (nodeData.name === "LoadImage") {
             const origCreated = nodeType.prototype.onNodeCreated;
+            const origConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function () {
+                protectNodeValueDuringMaskEdit(this, () => origConfigure?.apply(this, arguments));
+                restoreLoadImageState(this);
+            };
             nodeType.prototype.onNodeCreated = function () {
                 origCreated?.apply(this, arguments);
-                requestAnimationFrame(() => {
-                    installImageWidgetPrewarm(this);
-                    prewarmEditorForNode(this);
-                    refreshClipspacePreview(this);
-                });
+                initializeLoadImageNode(this);
             };
             return;
         }
 
         const origCreated = nodeType.prototype.onNodeCreated;
+        const origConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            const config = arguments[0];
+            this._guhaiConfiguredFromWorkflow = !!(config && Array.isArray(config.size));
+            protectNodeValueDuringMaskEdit(this, () => origConfigure?.apply(this, arguments));
+            restoreLoadImageState(this);
+        };
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
+            initializeLoadImageNode(this, { floating: true });
             requestAnimationFrame(() => {
-                hideBulkyWidgets(this);
-                installImageWidgetPrewarm(this);
-                installFloatingButtons(this);
-                prewarmEditorForNode(this);
-                refreshClipspacePreview(this);
+                if (!this._guhaiConfiguredFromWorkflow) {
+                    this.setSize?.([350, 500]);
+                    this.size = [350, 500];
+                }
                 this.setDirtyCanvas(true, true);
             });
         };
