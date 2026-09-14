@@ -13,6 +13,7 @@ const VIEW_MODES = [
 const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 const LABEL_HEIGHT = 20;
 const HORIZONTAL_SPLIT_GAP_PX = 1;
+const VERTICAL_SPLIT_GAP_PX = 2;
 const MIN_NODE_WIDTH = 300;
 const MIN_NODE_HEIGHT = 400;
 const MAX_BATCH_PREVIEWS = 10;
@@ -721,10 +722,10 @@ function compareViewports(width, mediaHeight, layout, gap = 0) {
         ];
     }
     if (layout === "vertical") {
-        const rowHeight = Math.max(1, (mediaHeight - LABEL_HEIGHT) / 2);
+        const rowHeight = Math.max(1, (mediaHeight - VERTICAL_SPLIT_GAP_PX) / 2);
         return [
             { x: 0, y: 0, w: width, h: rowHeight },
-            { x: 0, y: rowHeight + LABEL_HEIGHT, w: width, h: rowHeight },
+            { x: 0, y: rowHeight + VERTICAL_SPLIT_GAP_PX, w: width, h: rowHeight },
         ];
     }
     return [{ x: 0, y: 0, w: width, h: mediaHeight }];
@@ -899,11 +900,11 @@ function drawCanvasPreview(state, geometry = measureComparer(state)) {
         rectA = { x: (paneWidth - h * arA) / 2, y: (mediaH - h) / 2, w: h * arA, h };
         rectB = { x: paneWidth + horizontalGap + (paneWidth - h * arB) / 2, y: (mediaH - h) / 2, w: h * arB, h };
     } else if (layout === "vertical") {
-        const rowH = Math.max(1, (mediaH - LABEL_HEIGHT) / 2);
+        const rowH = Math.max(1, (mediaH - VERTICAL_SPLIT_GAP_PX) / 2);
         const w = Math.min(cssW, Math.max(1, rowH - LABEL_HEIGHT / 2) * Math.min(arA, arB));
         const hA = w / Math.max(arA, 0.0001), hB = w / Math.max(arB, 0.0001);
         rectA = { x: (cssW - w) / 2, y: (rowH - hA) / 2, w, h: hA };
-        rectB = { x: (cssW - w) / 2, y: rowH + LABEL_HEIGHT + (rowH - hB) / 2, w, h: hB };
+        rectB = { x: (cssW - w) / 2, y: rowH + VERTICAL_SPLIT_GAP_PX + (rowH - hB) / 2, w, h: hB };
     } else {
         const commonH = Math.min(mediaH, cssW / Math.max(arA, arB, 0.0001));
         rectA = { x: (cssW - commonH * arA) / 2, y: (mediaH - commonH) / 2, w: commonH * arA, h: commonH };
@@ -1127,7 +1128,7 @@ function updateMediaGeometry(state) {
         const arA = Math.max(1, Number(a.width) || 1) / Math.max(1, Number(a.height) || 1);
         const arB = Math.max(1, Number(b.width) || 1) / Math.max(1, Number(b.height) || 1);
         // Use one shared width and derive both heights, so the split is aligned.
-        const rowHeight = Math.max(1, (mediaHeight - LABEL_HEIGHT) / 2);
+        const rowHeight = Math.max(1, (mediaHeight - VERTICAL_SPLIT_GAP_PX) / 2);
         const commonWidth = Math.min(width, (rowHeight - LABEL_HEIGHT / 2) * arA, (rowHeight - LABEL_HEIGHT / 2) * arB);
         setElementSize(state.aElement, commonWidth, commonWidth / Math.max(arA, 0.0001));
         setElementSize(state.bElement, commonWidth, commonWidth / Math.max(arB, 0.0001));
@@ -2162,6 +2163,7 @@ app.registerExtension({
             if (payload && !payload.preserve) {
                 createComparer(this);
                 setMedia(this.__ghComparer, { a: payload.a || { kind: "unknown" }, b: payload.b || { kind: "unknown" } }, true);
+                updateVideoControls(this.__ghComparer);
             }
             return result;
         };
