@@ -14,6 +14,7 @@ const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 const LABEL_HEIGHT = 20;
 const HORIZONTAL_SPLIT_GAP_PX = 1;
 const VERTICAL_SPLIT_GAP_PX = 2;
+const SLIDE_DIVIDER_WIDTH_PX = 0.5;
 const MIN_NODE_WIDTH = 300;
 const MIN_NODE_HEIGHT = 400;
 const MAX_BATCH_PREVIEWS = 10;
@@ -301,6 +302,11 @@ function mediaUrl(data) {
         subfolder: data.subfolder || "",
     });
     return api.apiURL(`/view?${query}${app.getRandParam?.() || ""}`);
+}
+
+function mediaDownloadName(data) {
+    const filename = String(data?.filename || "media").split(/[\\/]/).pop() || "media";
+    return filename;
 }
 
 function normalizedType(type) {
@@ -699,6 +705,29 @@ function fitSize(data, maxWidth, maxHeight) {
     return { width: Math.max(1, width * scale), height: Math.max(1, height * scale) };
 }
 
+function mediaAspect(data) {
+    return Math.max(1, Number(data?.width) || 1) / Math.max(1, Number(data?.height) || 1);
+}
+
+function slideMediaRects(a, b, width, mediaHeight) {
+    const arA = mediaAspect(a);
+    const arB = mediaAspect(b);
+    const commonH = Math.min(mediaHeight, width / Math.max(arA, arB, 0.0001));
+    return [
+        { x: (width - commonH * arA) / 2, y: (mediaHeight - commonH) / 2, w: commonH * arA, h: commonH },
+        { x: (width - commonH * arB) / 2, y: (mediaHeight - commonH) / 2, w: commonH * arB, h: commonH },
+    ];
+}
+
+function mediaRectsBounds(rectA, rectB) {
+    return {
+        left: Math.min(rectA.x, rectB.x),
+        right: Math.max(rectA.x + rectA.w, rectB.x + rectB.w),
+        top: Math.min(rectA.y, rectB.y),
+        bottom: Math.max(rectA.y + rectA.h, rectB.y + rectB.h),
+    };
+}
+
 function setElementSize(element, width, height) {
     if (!element || element.dataset?.placeholder === "true") return;
     element.style.width = `${Math.max(1, width)}px`;
@@ -796,6 +825,98 @@ function comparePointLocal(state, clientX, clientY, geometry) {
     return { x, y, index, viewport, viewports };
 }
 
+function sideAtEvent(state, event) {
+    if (effectiveView(state) === "slide") {
+        const rect = state.stage.getBoundingClientRect();
+        const midpoint = rect.left + rect.width / 2;
+        return event.clientX < midpoint ? "a" : "b";
+    }
+    return comparePointLocal(state, event.clientX, event.clientY, measureComparer(state))?.index === 1 ? "b" : "a";
+}
+
+function mediaForMenuEvent(state, event) {
+    const side = sideAtEvent(state, event);
+    const selected = state.media?.[side];
+    if (isRealMedia(selected)) return selected;
+    const other = state.media?.[side === "a" ? "b" : "a"];
+    return isRealMedia(other) ? other : null;
+}
+
+async function fetchMediaBlob(data) {
+    const response = await fetch(mediaUrl(data));
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.blob();
+}
+
+function loadImageForClipboard(data) {
+    return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.crossOrigin = "anonymous";
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("image load failed"));
+        image.src = mediaUrl(data);
+    });
+}
+
+async function copyImageMedia(data) {
+    const image = await loadImageForClipboard(data);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth || image.width;
+    canvas.height = image.naturalHeight || image.height;
+    const context = canvas.getContext("2d");
+    if (!context || !canvas.width || !canvas.height) throw new Error("canvas unavailable");
+    context.drawImage(image, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) throw new Error("image encode failed");
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+}
+
+async function copyMedia(data) {
+    if (data?.kind === "image") {
+        await copyImageMedia(data);
+        return;
+    }
+    const blob = await fetchMediaBlob(data);
+    try {
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type || "application/octet-stream"]: blob })]);
+    } catch (error) {
+        await navigator.clipboard.writeText(mediaUrl(data));
+    }
+}
+
+async function saveMedia(data) {
+    const blob = await fetchMediaBlob(data);
+    const url = URL.createObjectURL(blob);
+    try {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = mediaDownloadName(data);
+        link.style.display = "none";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+}
+
+function addMediaMenuOptions(state, event, options) {
+    if (!pointInsideComparerStage(state, event)) return;
+    const data = mediaForMenuEvent(state, event);
+    if (!data) return;
+    const label = data.kind === "video" ? "视频" : "图像";
+    options.unshift(
+        {
+            content: `复制${label}`,
+            callback: () => copyMedia(data).catch((error) => console.error("[GoohaiTools] copy media failed", error)),
+        },
+        {
+            content: `保存${label}`,
+            callback: () => saveMedia(data).catch((error) => console.error("[GoohaiTools] save media failed", error)),
+        },
+    );
+}
+
 function zoomCompareAt(state, event) {
     const layout = effectiveView(state);
     if (layout === "slide" || !pointInsideComparerStage(state, event)) return false;
@@ -889,8 +1010,8 @@ function drawCanvasPreview(state, geometry = measureComparer(state)) {
     state.lastCanvasWindowKey = [renderRect.x, renderRect.y, renderRect.w, renderRect.h, rasterScale].join(";");
     const mediaH = Math.max(1, cssH - LABEL_HEIGHT);
     const a = state.media?.a || {}, b = state.media?.b || {};
-    const arA = Math.max(1, Number(a.width) || 1) / Math.max(1, Number(a.height) || 1);
-    const arB = Math.max(1, Number(b.width) || 1) / Math.max(1, Number(b.height) || 1);
+    const arA = mediaAspect(a);
+    const arB = mediaAspect(b);
     let rectA, rectB;
     const layout = effectiveView(state);
     if (layout === "horizontal") {
@@ -906,16 +1027,9 @@ function drawCanvasPreview(state, geometry = measureComparer(state)) {
         rectA = { x: (cssW - w) / 2, y: (rowH - hA) / 2, w, h: hA };
         rectB = { x: (cssW - w) / 2, y: rowH + VERTICAL_SPLIT_GAP_PX + (rowH - hB) / 2, w, h: hB };
     } else {
-        const commonH = Math.min(mediaH, cssW / Math.max(arA, arB, 0.0001));
-        rectA = { x: (cssW - commonH * arA) / 2, y: (mediaH - commonH) / 2, w: commonH * arA, h: commonH };
-        rectB = { x: (cssW - commonH * arB) / 2, y: (mediaH - commonH) / 2, w: commonH * arB, h: commonH };
+        [rectA, rectB] = slideMediaRects(a, b, cssW, mediaH);
     }
-    state.previewBounds = {
-        left: Math.min(rectA.x, rectB.x),
-        right: Math.max(rectA.x + rectA.w, rectB.x + rectB.w),
-        top: Math.min(rectA.y, rectB.y),
-        bottom: Math.max(rectA.y + rectA.h, rectB.y + rectB.h),
-    };
+    state.previewBounds = mediaRectsBounds(rectA, rectB);
     const horizontalGap = layout === "horizontal" ? horizontalSplitGap(cssW, geometry.rect?.width) : 0;
     const viewports = compareViewports(cssW, mediaH, layout, horizontalGap);
     state.compareBaseRects = [rectA, rectB];
@@ -968,15 +1082,17 @@ function drawCanvasPreview(state, geometry = measureComparer(state)) {
         draw(state.aElement, rectA, a);
         const lineX = Math.max(0, Math.min(cssW, cssW * state.position));
         ctx.save(); ctx.beginPath(); ctx.rect(-renderRect.x, -renderRect.y, cssW * state.position, mediaH); ctx.clip(); draw(state.bElement, rectB, b); ctx.restore();
-        // Redraw A only inside the one-pixel divider, then invert it with the
+        // Redraw A only inside the divider, then invert it with the
         // native difference compositor. This is per-pixel A inversion without
         // getImageData, temporary pixel buffers, layer caches, or disk writes.
-        if (state.lineVisible && (hasA || hasB)) {
+        const lineBounds = mediaRectsBounds(rectA, rectB);
+        if (state.lineVisible && (hasA || hasB) && lineX >= lineBounds.left && lineX <= lineBounds.right) {
+            const dividerLeft = lineX - SLIDE_DIVIDER_WIDTH_PX / 2;
             ctx.save();
-            ctx.beginPath(); ctx.rect(lineX - 0.5 - renderRect.x, -renderRect.y, 1, mediaH); ctx.clip();
+            ctx.beginPath(); ctx.rect(dividerLeft - renderRect.x, lineBounds.top - renderRect.y, SLIDE_DIVIDER_WIDTH_PX, lineBounds.bottom - lineBounds.top); ctx.clip();
             draw(state.aElement, rectA, a);
             ctx.globalCompositeOperation = "difference"; ctx.fillStyle = "#fff";
-            ctx.fillRect(lineX - 0.5 - renderRect.x, -renderRect.y, 1, mediaH); ctx.restore();
+            ctx.fillRect(dividerLeft - renderRect.x, lineBounds.top - renderRect.y, SLIDE_DIVIDER_WIDTH_PX, lineBounds.bottom - lineBounds.top); ctx.restore();
         }
     } else {
         drawCompared(state.aElement, rectA, viewports[0]);
@@ -1161,9 +1277,12 @@ function updateDividerGeometry(state) {
     const scale = rect.width > 0 ? rect.width / localWidth : 1;
     // Keep the divider position continuous. Rounding here makes small mouse
     // movements appear inert and then jump several pixels at once. Only the
-    // line width is compensated for graph zoom so it remains one screen pixel.
+    // line width is compensated for graph zoom so it keeps the intended screen width.
     const localX = Math.max(0, Math.min(localWidth, (rect.width * state.position) / Math.max(scale, 0.0001)));
-    const localLineWidth = 1 / Math.max(scale, 0.0001);
+    const localLineWidth = SLIDE_DIVIDER_WIDTH_PX / Math.max(scale, 0.0001);
+    const [rectA, rectB] = slideMediaRects(state.media?.a || {}, state.media?.b || {}, localWidth, localHeight);
+    const lineBounds = mediaRectsBounds(rectA, rectB);
+    const lineOverMedia = localX >= lineBounds.left && localX <= lineBounds.right;
     // Match rgthree's single-crop compositing: A is the complete base image;
     // only B is clipped. This removes the second anti-aliased edge that caused
     // the intermittent one-pixel ghost to the left of the divider.
@@ -1188,7 +1307,9 @@ function updateDividerGeometry(state) {
     // Keep the divider on its compositor layer for continuous, smooth motion.
     state.divider.style.left = "0";
     state.divider.style.width = `${localLineWidth}px`;
-    state.divider.style.height = `${localHeight}px`;
+    state.divider.style.top = `${lineBounds.top}px`;
+    state.divider.style.height = `${Math.max(0, lineBounds.bottom - lineBounds.top)}px`;
+    state.divider.style.opacity = state.lineVisible && lineOverMedia ? "1" : "0";
     state.divider.style.transform = `translate3d(${localX}px,0,0)`;
 }
 
@@ -1430,7 +1551,7 @@ function createComparer(node) {
     const bPane = el("div", { position: "absolute", inset: "0", overflow: "hidden" });
     const bClip = el("div", { position: "absolute", left: "0", top: "0", right: "0", bottom: "16px", overflow: "hidden" });
     bClip.appendChild(bPane);
-    const divider = el("div", { position: "absolute", top: "0", width: "1px", height: "100%", background: "#fff", mixBlendMode: "difference", pointerEvents: "none", zIndex: "5", transform: "translate3d(0,0,0)", willChange: "transform, opacity", opacity: "0", boxShadow: "none", outline: "none" });
+    const divider = el("div", { position: "absolute", top: "0", width: `${SLIDE_DIVIDER_WIDTH_PX}px`, height: "100%", background: "#fff", mixBlendMode: "difference", pointerEvents: "none", zIndex: "5", transform: "translate3d(0,0,0)", willChange: "transform, opacity", opacity: "0", boxShadow: "none", outline: "none" });
     const sizeStyle = { position: "absolute", bottom: "2px", zIndex: "8", color: "#aeb3bc", fontSize: "10px", lineHeight: "13px", textShadow: "none", pointerEvents: "none", boxSizing: "border-box", padding: "0 7px" };
     const aSize = el("div", sizeStyle);
     const bSize = el("div", sizeStyle);
@@ -1527,11 +1648,13 @@ function createComparer(node) {
         scheduleDimensionLabelRefresh(state);
     };
     const setDividerVisible = (visible) => {
-        const next = Boolean(visible && effectiveView(state) === "slide" && (isRealMedia(state.media?.a) || isRealMedia(state.media?.b)));
-        state.divider.style.display = effectiveView(state) === "slide" ? "block" : "none";
-        state.divider.style.opacity = next ? "1" : "0";
+        const slide = effectiveView(state) === "slide";
+        const next = Boolean(visible && slide && (isRealMedia(state.media?.a) || isRealMedia(state.media?.b)));
+        state.divider.style.display = slide ? "block" : "none";
         if (state.lineVisible === next) return;
         state.lineVisible = next;
+        if (slide) updateDividerGeometry(state);
+        else state.divider.style.opacity = "0";
         drawCanvasPreview(state);
     };
     const pointInsideStage = (event) => {
@@ -1884,6 +2007,7 @@ function createComparer(node) {
         beginNodeDrag(event);
     });
     stage.addEventListener("contextmenu", (event) => {
+        state.lastContextMenuEvent = event;
         // Nodes 2.0 already owns the node context-menu event. Let it bubble
         // through the DOM node unchanged; Legacy's DOM widget covers the
         // canvas, so only Legacy needs this small native menu bridge.
@@ -2154,6 +2278,16 @@ app.registerExtension({
             // frame; only content/layout interactions mark it dirty.
             if (state) scheduleDimensionLabelRefresh(state);
             return result;
+        };
+
+        const extraMenu = nodeType.prototype.getExtraMenuOptions;
+        nodeType.prototype.getExtraMenuOptions = function (canvas, options) {
+            const result = extraMenu?.apply(this, arguments);
+            const state = this.__ghComparer;
+            const menuEvent = state?.lastContextMenuEvent;
+            if (state) state.lastContextMenuEvent = null;
+            if (menuEvent) addMediaMenuOptions(state, menuEvent, options);
+            return result || [];
         };
 
         const executed = nodeType.prototype.onExecuted;
