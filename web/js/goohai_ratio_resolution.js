@@ -138,7 +138,9 @@ function updateNodeView(node) {
     const isCustom = ratioName === "自定义宽高";
     const isTotalPixels = mode === "总像素";
 
-    // 自定义宽高只需要自定宽度/高度；总像素只需要百万像素。
+    // 自定义宽高不需要模式、固定边像素或百万像素；
+    // 总像素只需要百万像素。
+    setWidgetVisible(getWidget(node, "模式"), !isCustom);
     setWidgetVisible(getWidget(node, "固定边像素"), !isCustom && !isTotalPixels);
     setWidgetVisible(getWidget(node, "百万像素"), !isCustom && isTotalPixels);
     setWidgetVisible(getWidget(node, "自定宽度"), isCustom);
