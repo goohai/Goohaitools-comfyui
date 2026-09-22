@@ -1809,6 +1809,24 @@ function isZKeyEvent(e) {
     return e.code === "KeyZ" || e.keyCode === 90 || key === "z" || key === "Z" || code === 0xff5a || code === 0xff3a;
 }
 
+function isTextEditingTarget(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    return target.matches(
+        "input, textarea, [contenteditable='true'], " +
+        "[data-testid='node-title-input'], .node-title-input, .node-title-editor, " +
+        ".group-title-editor input, .group-title-editor textarea"
+    ) || Boolean(target.closest?.(
+        "[contenteditable='true'], [data-testid='node-title-input'], " +
+        ".node-title-editor, .group-title-editor"
+    ));
+}
+
+function isTextEditingEvent(e) {
+    // The hotkey listener runs in capture phase, so check both the original
+    // event target and the focused editor before handling Z/X globally.
+    return isTextEditingTarget(e?.target) || isTextEditingTarget(document.activeElement);
+}
+
 function isXKeyEvent(e) {
     if (e.ctrlKey || e.altKey || e.metaKey) return false;
     const key = String(e.key || "");
@@ -1870,6 +1888,7 @@ function installMaskEditorHotkey() {
         const isZ = isZKeyEvent(e);
         const isX = isXKeyEvent(e);
         if (!isZ && !isX) return;
+        if ((isZ || isX) && isTextEditingEvent(e)) return;
         const node = selectedLoadImageNode();
         if (!node) return;
         e.preventDefault();

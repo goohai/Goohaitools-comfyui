@@ -1665,6 +1665,23 @@ function createComparer(node) {
     const eventHitsStage = (event) => pointInsideStage(event);
     const isNodes2Node = () => Boolean(root.closest('[data-testid^="node-body-"]'));
     const isLegacyNode = () => !isNodes2Node();
+    const isNodePinned = () => Boolean(state.node.flags?.pinned);
+    const consumePinnedPreviewPointerDown = (event) => {
+        if (!isNodePinned()) return false;
+        if (videos(state).length > 0) {
+            state.nodes2VideoClick = {
+                pointerId: event.pointerId ?? null,
+                x: event.clientX,
+                y: event.clientY,
+                moved: false,
+            };
+        } else {
+            state.nodes2VideoClick = null;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        return true;
+    };
     const beginCanvasPan = (event) => {
         const panGesture = event.button === 1;
         if (!panGesture || panning || state.nodeDragging || !eventHitsStage(event)) return false;
@@ -1727,6 +1744,10 @@ function createComparer(node) {
         // left-button gesture to the native node element; Alt comparison and
         // Space/canvas gestures keep their existing paths above this bridge.
         if (isLegacyNode() || event.button !== 0 || event.altKey || spacePressed || panning || comparePanning || !eventHitsStage(event)) return false;
+        // Respect ComfyUI's P-key pin state. The comparer normally forwards
+        // preview drags to the Nodes 2.0 node wrapper, which would otherwise
+        // bypass the native pinned-node movement guard.
+        if (consumePinnedPreviewPointerDown(event)) return true;
         const nodeRoot = root.closest(".lg-node");
         if (!(nodeRoot instanceof HTMLElement)) return false;
         if (videos(state).length > 0) {
@@ -1976,6 +1997,9 @@ function createComparer(node) {
         if (!isLegacyNode() || event.button !== 0 || spacePressed || panning || state.nodeDragging || !eventHitsStage(event)) return false;
         if (beginCanvasPan(event)) return true;
         if (beginComparePan(event)) return true;
+        // The Legacy DOM widget has its own node-drag adapter, so it must
+        // explicitly honor the same pinned flag as LiteGraph's canvas path.
+        if (consumePinnedPreviewPointerDown(event)) return true;
         event.preventDefault();
         event.stopPropagation();
         state.nodeDragging = true;
