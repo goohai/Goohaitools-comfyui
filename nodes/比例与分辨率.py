@@ -59,8 +59,8 @@ class GoohaiRatioAndResolution:
             },
         }
 
-    RETURN_TYPES = ("FLOAT", "INT", "INT")
-    RETURN_NAMES = ("比值", "宽度", "高度")
+    RETURN_TYPES = ("STRING", "INT", "INT")
+    RETURN_NAMES = ("比例", "宽度", "高度")
     FUNCTION = "calculate"
     CATEGORY = "孤海工具箱"
 
@@ -110,6 +110,14 @@ class GoohaiRatioAndResolution:
             return None
         return cls.RATIO_VALUES.get(比例, (1.0, 1.0))
 
+    @staticmethod
+    def _simplest_ratio(width, height):
+        """根据最终整数宽高返回最简整数比例字符串。"""
+        width = max(1, int(width))
+        height = max(1, int(height))
+        divisor = math.gcd(width, height)
+        return f"{width // divisor}:{height // divisor}"
+
     def calculate(
         self,
         比例,
@@ -158,17 +166,22 @@ class GoohaiRatioAndResolution:
         else:
             最终宽度 = self._round_to_multiple(宽度, 倍数取整)
             最终高度 = self._round_to_multiple(高度, 倍数取整)
+        if 比例 in ("原始比例", "自定义宽高"):
+            输出比例 = self._simplest_ratio(最终宽度, 最终高度)
+        else:
+            输出比例 = str(比例)
         最终比值 = round(float(最终宽度) / float(最终高度), 10)
         # 通过 UI 执行事件把实际后端结果回传给前端节点，
         # 这样中间经过其他图像节点、运行前无法读取尺寸时，
         # 执行完成后仍能显示真实的最终宽高。
         return {
-            "result": (最终比值, 最终宽度, 最终高度),
+            "result": (输出比例, 最终宽度, 最终高度),
             "ui": {
                 "ratio_resolution": [{
                     "width": 最终宽度,
                     "height": 最终高度,
                     "ratio": 最终比值,
+                    "ratio_string": 输出比例,
                 }]
             },
         }

@@ -1,3 +1,4 @@
+import ast
 import math
 
 class AnyType(str):
@@ -137,13 +138,62 @@ class MathExpressionNode:
     CATEGORY = "孤海工具箱"
     OUTPUT_NODE = False
 
-    def to_number(self, value):
+    @staticmethod
+    def to_number(value):
         if value is None:
             return 0.0
+        if isinstance(value, str):
+            expression = value.strip()
+            if not expression:
+                return 0.0
+            # 输入端可能接收到比例字符串或全角数学符号，例如 3:4、3：4、3×4。
+            expression = (expression
+                          .replace(":", "/")
+                          .replace("：", "/")
+                          .replace("／", "/")
+                          .replace("×", "*")
+                          .replace("＊", "*")
+                          .replace("＋", "+")
+                          .replace("－", "-")
+                          .replace("−", "-")
+                          .replace("（", "(")
+                          .replace("）", ")"))
+            try:
+                tree = ast.parse(expression, mode="eval")
+                return float(MathExpressionNode._eval_numeric_expression(tree.body))
+            except (SyntaxError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+                return 0.0
         try:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+    @staticmethod
+    def _eval_numeric_expression(node):
+        """Evaluate only a numeric arithmetic expression; names/calls are rejected."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return node.value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = MathExpressionNode._eval_numeric_expression(node.operand)
+            return value if isinstance(node.op, ast.UAdd) else -value
+        if isinstance(node, ast.BinOp):
+            left = MathExpressionNode._eval_numeric_expression(node.left)
+            right = MathExpressionNode._eval_numeric_expression(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+            if isinstance(node.op, ast.FloorDiv):
+                return left // right
+            if isinstance(node.op, ast.Mod):
+                return left % right
+            if isinstance(node.op, ast.Pow):
+                return left ** right
+        raise ValueError("不是可计算的数字表达式")
 
     def calculate(self, 值1, 值2, a=0, b=0, c=0, d=0, f=0):
         # 两个表达式都为空时返回默认值 + 帮助文本
@@ -213,11 +263,11 @@ class MathExpressionNode:
 
         值1 = kwargs.get("值1", "")
         值2 = kwargs.get("值2", "")
-        a = _norm(kwargs.get("a", 0))
-        b = _norm(kwargs.get("b", 0))
-        c = _norm(kwargs.get("c", 0))
-        d = _norm(kwargs.get("d", 0))
-        f = _norm(kwargs.get("f", 0))
+        a = cls.to_number(kwargs.get("a", 0))
+        b = cls.to_number(kwargs.get("b", 0))
+        c = cls.to_number(kwargs.get("c", 0))
+        d = cls.to_number(kwargs.get("d", 0))
+        f = cls.to_number(kwargs.get("f", 0))
 
         return f"{值1}|{值2}|{a:.10g}|{b:.10g}|{c:.10g}|{d:.10g}|{f:.10g}"
 

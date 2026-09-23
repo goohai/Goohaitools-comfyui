@@ -198,8 +198,8 @@ function invalidateExecutedSize(node) {
 function updateOutputNames(node, size) {
     const outputs = node.outputs || [];
     if (outputs[0]) {
-        outputs[0].name = "比值";
-        outputs[0].label = "比值";
+        outputs[0].name = "比例";
+        outputs[0].label = "比例";
     }
     if (outputs[1]) {
         outputs[1].name = "宽度";
