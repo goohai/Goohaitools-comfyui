@@ -157,10 +157,9 @@ def scan_models(models_dir: str | os.PathLike[str]) -> tuple[GGUFModel, ...]:
         architecture = str(metadata.get("general.architecture", "")).casefold()
         general_type = str(metadata.get("general.type", "")).casefold()
         is_mmproj = general_type == "mmproj" or "mmproj" in path.name.casefold()
-        root_label = root.name
-        display = relative
-        if duplicate_keys.get(relative.casefold(), 0) > 1:
-            display = f"[{root_label}] {relative}"
+        # Keep the dropdown compact: nested folders are only a storage detail
+        # and should not be shown in the model selector.
+        display = path.name
         entries.append(GGUFModel(
             key=f"{os.path.normcase(str(path))}",
             display=display,

@@ -9,6 +9,10 @@ const RATIO_VALUES = {
     "21:9": [21, 9], "1:2": [1, 2], "2:1": [2, 1],
 };
 
+const MODE_VALUES = [
+    "固定长边", "固定短边", "固定宽度", "固定高度", "总像素", "长边（范围）",
+];
+
 function getWidget(node, name) {
     return node.widgets?.find((w) => w.name === name);
 }
@@ -43,18 +47,27 @@ function estimateSize(node) {
     const mode = String(widgetValue(node, "模式", "固定长边"));
     const fixed = Number(widgetValue(node, "固定边像素", 1024));
     const mp = Math.max(0.2, Number(widgetValue(node, "百万像素", 2.0)) || 2.0);
+    const minLong = Math.max(8, Math.trunc(Number(widgetValue(node, "长边最小", 512)) || 512));
+    const maxLong = Math.max(8, Math.trunc(Number(widgetValue(node, "长边最大", 2048)) || 2048));
     const customW = Number(widgetValue(node, "自定宽度", 1024));
     const customH = Number(widgetValue(node, "自定高度", 1024));
     const multiple = Number(widgetValue(node, "倍数取整", 16));
 
     // “原始比例”时区分三种状态：没有连接图像、已连接且可读尺寸、
     // 已连接但前端无法穿透中间节点读取尺寸。第三种不能伪显示 1:1。
-    const imageInfo = ratioName === "原始比例" ? connectedImageInfo(node) : null;
-    if (ratioName === "原始比例" && imageInfo.connected && !imageInfo.size) {
-        if (node._ghRatioResolutionExecutedSize) {
-            return { ...node._ghRatioResolutionExecutedSize };
-        }
+    const imageInfo = (ratioName === "原始比例" || mode === "长边（范围）")
+        ? connectedImageInfo(node)
+        : null;
+    if (mode === "长边（范围）" && !imageInfo?.connected) {
         return { width: null, height: null, ratio: null, unknown: true };
+    }
+    if (ratioName === "原始比例" && imageInfo.connected && !imageInfo.size) {
+        if (mode !== "长边（范围）") {
+            if (node._ghRatioResolutionExecutedSize) {
+                return { ...node._ghRatioResolutionExecutedSize };
+            }
+            return { width: null, height: null, ratio: null, unknown: true };
+        }
     }
 
     let w, h;
@@ -68,7 +81,16 @@ function estimateSize(node) {
             : (RATIO_VALUES[ratioName] || [1, 1]);
         const rw = pair[0];
         const rh = pair[1];
-        if (mode === "固定长边") {
+        if (mode === "长边（范围）") {
+            const originalLong = imageInfo.size
+                ? Math.max(imageInfo.size[0], imageInfo.size[1])
+                : 1536;
+            const lower = Math.min(minLong, maxLong);
+            const upper = Math.max(minLong, maxLong);
+            const targetLong = Math.min(Math.max(originalLong, lower), upper);
+            const scale = targetLong / Math.max(rw, rh);
+            w = rw * scale; h = rh * scale;
+        } else if (mode === "固定长边") {
             const scale = fixed / Math.max(rw, rh);
             w = rw * scale; h = rh * scale;
         } else if (mode === "固定短边") {
@@ -137,12 +159,34 @@ function updateNodeView(node) {
     const mode = String(widgetValue(node, "模式", "固定长边"));
     const isCustom = ratioName === "自定义宽高";
     const isTotalPixels = mode === "总像素";
+    const imageInfo = connectedImageInfo(node);
+    const canUseRange = imageInfo.connected && !isCustom;
+    const modeWidget = getWidget(node, "模式");
+
+    // “长边（范围）”只在图像输入已连线且比例不是自定义宽高时显示。
+    // 保留原始选项数组，避免切换工作流后下拉选项被永久改写。
+    if (modeWidget) {
+        if (!modeWidget._ghRatioResolutionAllModeValues) {
+            modeWidget._ghRatioResolutionAllModeValues = [...MODE_VALUES];
+        }
+        const values = canUseRange
+            ? modeWidget._ghRatioResolutionAllModeValues
+            : modeWidget._ghRatioResolutionAllModeValues.filter((value) => value !== "长边（范围）");
+        modeWidget.options = modeWidget.options || {};
+        modeWidget.options.values = [...values];
+        if (!canUseRange && modeWidget.value === "长边（范围）") {
+            modeWidget.value = "固定长边";
+        }
+    }
 
     // 自定义宽高不需要模式、固定边像素或百万像素；
     // 总像素只需要百万像素。
     setWidgetVisible(getWidget(node, "模式"), !isCustom);
-    setWidgetVisible(getWidget(node, "固定边像素"), !isCustom && !isTotalPixels);
-    setWidgetVisible(getWidget(node, "百万像素"), !isCustom && isTotalPixels);
+    const isLongRange = canUseRange && mode === "长边（范围）";
+    setWidgetVisible(getWidget(node, "固定边像素"), !isCustom && !isTotalPixels && !isLongRange);
+    setWidgetVisible(getWidget(node, "百万像素"), !isCustom && isTotalPixels && !isLongRange);
+    setWidgetVisible(getWidget(node, "长边最小"), isLongRange);
+    setWidgetVisible(getWidget(node, "长边最大"), isLongRange);
     setWidgetVisible(getWidget(node, "自定宽度"), isCustom);
     setWidgetVisible(getWidget(node, "自定高度"), isCustom);
 

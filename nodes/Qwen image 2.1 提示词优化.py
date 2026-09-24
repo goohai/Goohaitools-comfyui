@@ -68,8 +68,9 @@ class QwenImagePromptOptimizer:
                 "视觉模型": (mmproj, {"default": _preferred(mmproj, "PE-I2I")}),
                 "输出语言": (["自动", "中文", "English"], {"default": "自动"}),
                 "透明背景": ("BOOLEAN", {"default": False}),
-                "种子值": (["固定", "随机"], {"default": "固定"}),
-                "卸载模型": ("BOOLEAN", {"default": True}),
+                "种子值": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFF}),
+                "种子模式": (["固定", "随机"], {"default": "固定"}),
+                "卸载模型": (["自动", "保持加载", "运行后自动卸载", "运行前后自动卸载"], {"default": "自动"}),
             },
             "optional": {
                 **{f"图像_{index:02d}": ("IMAGE",) for index in range(1, 11)},
@@ -83,8 +84,8 @@ class QwenImagePromptOptimizer:
     CATEGORY = "孤海工具箱/提示词"
 
     @classmethod
-    def IS_CHANGED(cls, 种子值="固定", **kwargs):
-        return float("nan") if 种子值 == "随机" else None
+    def IS_CHANGED(cls, 种子模式="固定", **kwargs):
+        return float("nan") if 种子模式 == "随机" else None
 
     def optimize(
         self,
@@ -95,10 +96,18 @@ class QwenImagePromptOptimizer:
         输出语言,
         透明背景,
         种子值,
-        卸载模型,
+        种子模式="固定",
+        卸载模型="自动",
         unique_id=None,
         **kwargs,
     ):
+        # Keep older saved workflows usable after the two selector changes.
+        if isinstance(种子值, str) and 种子值 in {"固定", "随机"}:
+            if 种子模式 == "固定":
+                种子模式 = 种子值
+            种子值 = 0
+        if isinstance(卸载模型, bool):
+            卸载模型 = "运行后自动卸载" if 卸载模型 else "保持加载"
         images = collect_images(kwargs)
         has_images = bool(images)
         # Empty user prompt plus valid images is reverse prompting. It uses the
@@ -141,9 +150,11 @@ class QwenImagePromptOptimizer:
 
         key = str(unique_id or id(self))
         with _SEED_LOCK:
-            if 种子值 == "随机" or key not in _LAST_SEEDS:
-                _LAST_SEEDS[key] = random_seed()
-            seed = _LAST_SEEDS[key]
+            if 种子模式 == "随机":
+                seed = random_seed()
+            else:
+                seed = max(0, min(0xFFFFFFFF, int(种子值)))
+            _LAST_SEEDS[key] = seed
 
         result = QwenImageRuntime.complete(
             model_path=model_path,
@@ -153,15 +164,18 @@ class QwenImagePromptOptimizer:
             images=images,
             prompt_mode="I2I" if (has_images and not reverse_mode) else "T2I",
             seed=seed,
-            unload=bool(卸载模型),
+            unload_mode=卸载模型,
             output_language=输出语言,
             original_user_prompt=str(用户提示词 or ""),
             transparent_background=bool(透明背景),
         )
-        return (
-            prompt_text_from_result(result, bool(透明背景)),
-            json_text_from_result(result, bool(透明背景)),
-        )
+        return {
+            "ui": {"seed": [seed]},
+            "result": (
+                prompt_text_from_result(result, bool(透明背景)),
+                json_text_from_result(result, bool(透明背景)),
+            ),
+        }
 
 
 NODE_CLASS_MAPPINGS = {"QwenImagePromptOptimizer": QwenImagePromptOptimizer}

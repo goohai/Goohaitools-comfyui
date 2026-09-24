@@ -4,6 +4,7 @@ const MAX_IMAGES = 10;
 const NODE_NAME = "QwenImagePromptOptimizer";
 const PROMPT_HEIGHT_PROPERTY = "qwen_prompt_height";
 const MIN_PROMPT_HEIGHT = 64;
+const SEED_WIDGET_NAMES = new Set(["种子值", "seed"]);
 const imageName = (index) => `图像_${String(index + 1).padStart(2, "0")}`;
 const isImageInput = (slot) => {
     const name = String(slot?.name || "");
@@ -16,6 +17,13 @@ function connected(slot) {
 
 function promptWidget(node) {
     return node.widgets?.find((item) => item.name === "用户提示词" || item.name === "user_prompt");
+}
+
+function updateSeedWidget(node, seed) {
+    const widget = node.widgets?.find((item) => SEED_WIDGET_NAMES.has(item.name));
+    if (!widget || !Number.isFinite(Number(seed))) return;
+    widget.value = Number(seed);
+    widget.callback?.(widget.value);
 }
 
 function asPromptHeight(value, fallback) {
@@ -162,6 +170,12 @@ app.registerExtension({
             originalConfigure?.apply(this, arguments);
             this._qwenImageScheduleSync?.();
             requestAnimationFrame(() => applyPromptLayout(this, true));
+        };
+        const originalExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (message) {
+            originalExecuted?.apply(this, arguments);
+            const seed = Array.isArray(message?.seed) ? message.seed[0] : message?.seed;
+            updateSeedWidget(this, seed);
         };
     },
 });

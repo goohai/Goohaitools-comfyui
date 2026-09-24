@@ -40,6 +40,10 @@ UINT32_MAX = 0xFFFFFFFF
 TRANSPARENT_PREFIX = "This is an RGBA image with transparency. "
 TRANSPARENT_SUFFIX = " The image has alpha channel and the background is transparent."
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
+UNLOAD_AUTO = "自动"
+UNLOAD_KEEP = "保持加载"
+UNLOAD_AFTER = "运行后自动卸载"
+UNLOAD_BEFORE_AFTER = "运行前后自动卸载"
 
 
 def _load_resource_module(name: str, filename: str):
@@ -547,32 +551,113 @@ class QwenImageRuntime:
     _llm = None
     _chat_handler = None
     _signature: tuple[str, str, int] | None = None
+    _handler_signature: tuple[str, bool] | None = None
 
     @classmethod
-    def _close_locked(cls) -> None:
-        llm = cls._llm
-        handler = cls._chat_handler
-        cls._llm = None
-        cls._chat_handler = None
-        cls._signature = None
-        if llm is not None:
-            try:
-                llm.close()
-            except Exception:
-                pass
-        if handler is not None:
-            try:
-                exit_stack = getattr(handler, "_exit_stack", None)
-                if exit_stack is not None:
-                    exit_stack.close()
-            except Exception:
-                pass
+    def _release_python_cache(cls) -> None:
         gc.collect()
         if model_management is not None:
             try:
                 model_management.soft_empty_cache()
             except Exception:
                 pass
+
+    @classmethod
+    def _close_locked(cls) -> None:
+        """Fully release the main GGUF, mmproj and all related caches."""
+        llm = cls._llm
+        handler = cls._chat_handler
+        cls._llm = None
+        cls._chat_handler = None
+        cls._signature = None
+        cls._handler_signature = None
+
+        if llm is not None:
+            try:
+                # Llama owns its chat handler and closes the mmproj context
+                # before releasing the native model/context stack.
+                llm.close()
+            except Exception:
+                pass
+        elif handler is not None:
+            # Covers a handler created just before a failed Llama constructor.
+            try:
+                close = getattr(handler, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+        cls._release_python_cache()
+
+    @staticmethod
+    def _unload_other_comfy_models() -> None:
+        """Release ComfyUI-managed models without closing this llama instance."""
+        if model_management is None:
+            return
+        # Calling free_memory(1e30, ...) with no loaded ComfyUI models still
+        # performs a full memory-management pass.  Skip that pass on the cold
+        # path when there is nothing for it to unload.
+        loaded_models = getattr(model_management, "current_loaded_models", None)
+        if loaded_models is not None and not loaded_models:
+            return
+        try:
+            devices = model_management.get_all_torch_devices()
+        except Exception:
+            devices = [model_management.get_torch_device()]
+        for device in devices:
+            try:
+                model_management.free_memory(1e30, device)
+            except Exception:
+                continue
+
+    @staticmethod
+    def _memory_snapshot() -> tuple[int, int]:
+        if model_management is None:
+            return (0, 0)
+        try:
+            device = model_management.get_torch_device()
+            free = int(model_management.get_free_memory(device))
+            total = int(model_management.get_total_memory(device))
+            return free, total
+        except Exception:
+            return (0, 0)
+
+    @staticmethod
+    def _estimated_model_memory(model_path: str, mmproj_path: str | None) -> int:
+        # The estimate is intentionally conservative: llama.cpp may allocate
+        # more than the raw GGUF sizes for runtime buffers and vision data.
+        total = 0
+        for path in (model_path, mmproj_path):
+            if path:
+                try:
+                    total += os.path.getsize(path)
+                except OSError:
+                    continue
+        return int(total * 1.25)
+
+    @classmethod
+    def _prepare_unload_mode(
+        cls,
+        unload_mode: str,
+        model_path: str,
+        mmproj_path: str | None,
+    ) -> None:
+        if unload_mode not in {UNLOAD_AUTO, UNLOAD_BEFORE_AFTER}:
+            return
+        # A warm llama.cpp instance does not need any ComfyUI memory cleanup.
+        # Avoid the new free/total-memory queries on the hot path; they are
+        # only relevant when this call will load or switch the instance.
+        requested_signature = (
+            os.path.abspath(model_path),
+            os.path.abspath(mmproj_path) if mmproj_path else "",
+        )
+        current_signature = cls._signature[:2] if cls._signature is not None else None
+        if cls._llm is not None and current_signature == requested_signature:
+            return
+        free, _ = cls._memory_snapshot()
+        required = cls._estimated_model_memory(model_path, mmproj_path)
+        if unload_mode == UNLOAD_BEFORE_AFTER or (required > 0 and free < required):
+            cls._unload_other_comfy_models()
 
     @classmethod
     def _ensure(
@@ -589,14 +674,19 @@ class QwenImageRuntime:
             os.path.abspath(mmproj_path) if mmproj_path else "",
             int(context_size),
         )
+        handler_signature = (
+            os.path.abspath(mmproj_path) if mmproj_path else "",
+            bool(image_mode),
+        )
         with cls._lock:
-            if cls._llm is not None and cls._signature == signature:
+            if (
+                cls._llm is not None
+                and cls._signature == signature
+                and cls._handler_signature == handler_signature
+            ):
                 return cls._llm
             cls._close_locked()
-            handler = None
             if mmproj_path:
-                if not mmproj_path:
-                    raise ValueError("图像模式需要选择视觉模型 mmproj。")
                 if Qwen35ChatHandler is None:
                     raise RuntimeError("当前 llama-cpp-python 没有 Qwen35ChatHandler。")
                 handler = Qwen35ChatHandler(
@@ -612,18 +702,23 @@ class QwenImageRuntime:
                     enable_thinking=False,
                     verbose=False,
                 )
-            cls._llm = Llama(
-                model_path=model_path,
-                chat_handler=handler,
-                # 与 ComfyUI-llama-cpp_vlm 的默认实现保持一致；部分 llama.cpp
-                # 构建中整数 -1 比字符串 all 更稳定地触发全量 GPU offload。
-                n_gpu_layers=-1,
-                n_ctx=int(context_size),
-                n_batch=2048,
-                n_ubatch=512,
-                verbose=False,
-            )
             cls._chat_handler = handler
+            cls._handler_signature = handler_signature
+            try:
+                cls._llm = Llama(
+                    model_path=model_path,
+                    chat_handler=handler,
+                    # 与 ComfyUI-llama-cpp_vlm 的默认实现保持一致；部分 llama.cpp
+                    # 构建中整数 -1 比字符串 all 更稳定地触发全量 GPU offload。
+                    n_gpu_layers=-1,
+                    n_ctx=int(context_size),
+                    n_batch=2048,
+                    n_ubatch=512,
+                    verbose=False,
+                )
+            except Exception:
+                cls._close_locked()
+                raise
             cls._signature = signature
             return cls._llm
 
@@ -638,7 +733,8 @@ class QwenImageRuntime:
         images: list[torch.Tensor],
         prompt_mode: str,
         seed: int,
-        unload: bool,
+        unload: bool = False,
+        unload_mode: str | None = None,
         reverse_mode: bool = False,
         output_language: str = "自动",
         original_user_prompt: str = "",
@@ -646,6 +742,8 @@ class QwenImageRuntime:
     ) -> dict[str, object]:
         vision_mode = bool(images)
         editing_mode = prompt_mode == "I2I"
+        if unload_mode is None:
+            unload_mode = UNLOAD_AFTER if unload else UNLOAD_KEEP
         with cls._lock:
             started_at = time.perf_counter()
             # 保留完整原生系统提示词，同时按图像数量平衡视觉信息、上下文
@@ -663,6 +761,7 @@ class QwenImageRuntime:
             else:
                 context_size = 32768
                 image_max_size = 256
+            cls._prepare_unload_mode(unload_mode, model_path, mmproj_path)
             llm = cls._ensure(model_path, mmproj_path, vision_mode, context_size)
             loaded_at = time.perf_counter()
             language_wrapped_prompt = _wrap_user_prompt_for_language(
@@ -731,7 +830,11 @@ class QwenImageRuntime:
                 )
             finally:
                 cls._clear_state_locked(llm)
-                if unload:
+                should_unload = unload_mode in {UNLOAD_AFTER, UNLOAD_BEFORE_AFTER}
+                if unload_mode == UNLOAD_AUTO:
+                    free, total = cls._memory_snapshot()
+                    should_unload = bool(total and free * 2 < total)
+                if should_unload:
                     cls._close_locked()
             return parsed
 
@@ -801,6 +904,11 @@ def append_transparency(prompt: str, enabled: bool) -> str:
     while text.endswith(suffix):
         text = text[:-len(suffix)].rstrip()
     text = _force_transparent_background_text(text)
+    # Keep the model-generated description and the fixed English RGBA suffix
+    # as two complete sentences.  Some responses end directly with a word,
+    # which otherwise produces ``...prompt The image has...``.
+    if text and text[-1] not in ".。!?！？;；":
+        text += "."
     return f"{TRANSPARENT_PREFIX}{text}{TRANSPARENT_SUFFIX}"
 
 

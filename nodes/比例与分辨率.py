@@ -26,6 +26,7 @@ class GoohaiRatioAndResolution:
         "固定宽度",
         "固定高度",
         "总像素",
+        "长边（范围）",
     ]
 
     RATIO_VALUES = {
@@ -50,6 +51,8 @@ class GoohaiRatioAndResolution:
                 "模式": (cls.MODE_OPTIONS, {"default": "固定长边"}),
                 "固定边像素": ("INT", {"default": 1024, "min": 8, "max": 10240, "step": 1}),
                 "百万像素": ("FLOAT", {"default": 2.0, "min": 0.2, "max": 50.0, "step": 0.1}),
+                "长边最小": ("INT", {"default": 512, "min": 8, "max": 10240, "step": 1}),
+                "长边最大": ("INT", {"default": 2048, "min": 8, "max": 10240, "step": 1}),
                 "自定宽度": ("INT", {"default": 1024, "min": 8, "max": 10240, "step": 1}),
                 "自定高度": ("INT", {"default": 1024, "min": 8, "max": 10240, "step": 1}),
                 "倍数取整": ("INT", {"default": 16, "min": 0, "max": 1024, "step": 1}),
@@ -124,6 +127,8 @@ class GoohaiRatioAndResolution:
         模式,
         固定边像素,
         百万像素,
+        长边最小,
+        长边最大,
         自定宽度,
         自定高度,
         倍数取整,
@@ -137,7 +142,17 @@ class GoohaiRatioAndResolution:
             比例宽 = max(1.0, float(比例宽))
             比例高 = max(1.0, float(比例高))
 
-            if 模式 == "固定长边":
+            if 模式 == "长边（范围）" and 比例 != "自定义宽高":
+                原宽度, 原高度 = self._image_size(图像)
+                原图长边 = max(1536, 原宽度, 原高度) if (原宽度 <= 1 or 原高度 <= 1) else max(原宽度, 原高度)
+                最小长边 = max(8, int(长边最小))
+                最大长边 = max(8, int(长边最大))
+                if 最小长边 > 最大长边:
+                    最小长边, 最大长边 = 最大长边, 最小长边
+                目标长边 = min(max(原图长边, 最小长边), 最大长边)
+                缩放 = float(目标长边) / max(比例宽, 比例高)
+                宽度, 高度 = 比例宽 * 缩放, 比例高 * 缩放
+            elif 模式 == "固定长边":
                 缩放 = float(固定边像素) / max(比例宽, 比例高)
                 宽度, 高度 = 比例宽 * 缩放, 比例高 * 缩放
             elif 模式 == "固定短边":
