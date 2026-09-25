@@ -11,6 +11,8 @@ MAX_IMAGES = 10
 ROUND_TO = 32
 MAX_RESOLUTION = 4096
 MAX_SINGLE_SIDE_CROP = 64
+MAX_REFERENCE_AREA = 2048 * 2048
+REFERENCE_SIZE_OPTIONS = ["自动", "768", "1024", "1344", "1536", "2048"]
 RESTORE_INFO_TYPE = "QWEN_IMAGE_21_GH_RESTORE_INFO"
 
 
@@ -23,6 +25,48 @@ def _rounded_area_size(width, height, target_area):
     target_width = max(ROUND_TO, round(math.sqrt(target_area * ratio) / ROUND_TO) * ROUND_TO)
     target_height = max(ROUND_TO, round(math.sqrt(target_area / ratio) / ROUND_TO) * ROUND_TO)
     return target_width, target_height
+
+
+def _area_limited_size(width, height, max_area):
+    """Return an aspect-preserving, 32-aligned size without enlarging small inputs."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    max_area = max(ROUND_TO * ROUND_TO, min(int(max_area), MAX_REFERENCE_AREA))
+
+    source_area = width * height
+    if source_area <= max_area:
+        target_width = max(ROUND_TO, (width // ROUND_TO) * ROUND_TO)
+        target_height = max(ROUND_TO, (height // ROUND_TO) * ROUND_TO)
+    else:
+        scale = math.sqrt(max_area / source_area)
+        target_width = max(ROUND_TO, min(width, round(width * scale / ROUND_TO) * ROUND_TO))
+        target_height = max(ROUND_TO, min(height, round(height * scale / ROUND_TO) * ROUND_TO))
+
+    # Rounding each axis independently can exceed the area limit. Reduce the
+    # axis with the larger relative rounding error until the hard cap holds.
+    while target_width * target_height > max_area:
+        width_error = target_width / width
+        height_error = target_height / height
+        if width_error >= height_error and target_width > ROUND_TO:
+            target_width -= ROUND_TO
+        elif target_height > ROUND_TO:
+            target_height -= ROUND_TO
+        elif target_width > ROUND_TO:
+            target_width -= ROUND_TO
+        else:
+            break
+
+    return target_width, target_height
+
+
+def _reference_area(ref_image_size, image_count, latent_width, latent_height):
+    if ref_image_size != "自动":
+        return min(int(ref_image_size) ** 2, MAX_REFERENCE_AREA)
+    if image_count <= 2:
+        return min(latent_width * latent_height, MAX_REFERENCE_AREA)
+    if image_count <= 4:
+        return 1024 * 1024
+    return 768 * 768
 
 
 def _resize_image(image, width, height, crop):
@@ -121,6 +165,7 @@ class TextEncodeQwenImage21GH:
                 "latent_width": ("INT", {"default": 1024, "min": ROUND_TO, "max": MAX_RESOLUTION, "step": ROUND_TO}),
                 "latent_height": ("INT", {"default": 1024, "min": ROUND_TO, "max": MAX_RESOLUTION, "step": ROUND_TO}),
                 "mode": (["裁剪", "填充"], {"default": "填充"}),
+                "ref_image_size": (REFERENCE_SIZE_OPTIONS, {"default": "自动"}),
             },
             "optional": {
                 "vae": ("VAE",),
@@ -135,7 +180,7 @@ class TextEncodeQwenImage21GH:
     CATEGORY = "孤海工具箱/条件"
     DESCRIPTION = "Qwen Image 2.1 conditioning with stable reference slots and aspect-safe reference sizing."
 
-    def encode(self, clip, prompt, negative_prompt, mode, latent_width, latent_height, vae=None, mask=None, **kwargs):
+    def encode(self, clip, prompt, negative_prompt, mode, latent_width, latent_height, vae=None, mask=None, ref_image_size="自动", **kwargs):
         if latent_width < ROUND_TO or latent_height < ROUND_TO or latent_width % ROUND_TO != 0 or latent_height % ROUND_TO != 0:
             raise ValueError("Text Encode Qwen Image 2.1 GH：latent 宽和高必须不小于 32，且为 32 的倍数。")
 
@@ -145,16 +190,24 @@ class TextEncodeQwenImage21GH:
             if _valid_image(kwargs.get(f"image_{index:02d}"))
         }
 
+        if ref_image_size not in REFERENCE_SIZE_OPTIONS:
+            ref_image_size = "自动"
+
         primary = images.get(1)
-        target_area = latent_width * latent_height
+        target_area = _reference_area(ref_image_size, len(images), latent_width, latent_height)
         primary_matches_target = False
         if primary is not None:
             primary_matches_target = _cover_crop_is_small(
                 primary.shape[2], primary.shape[1], latent_width, latent_height
-            )
-            if not primary_matches_target:
-                primary_size = _rounded_area_size(primary.shape[2], primary.shape[1], target_area)
-                target_area = primary_size[0] * primary_size[1]
+            ) and latent_width * latent_height <= MAX_REFERENCE_AREA
+            if not primary_matches_target and ref_image_size == "自动" and len(images) <= 2:
+                # Preserve the original 1–2 image behavior: a far-aspect-ratio
+                # primary reference establishes the shared rounded area for
+                # the remaining reference images.
+                primary_width, primary_height = _area_limited_size(
+                    primary.shape[2], primary.shape[1], target_area
+                )
+                target_area = primary_width * primary_height
 
         images_vl = []
         ref_latents = []
@@ -186,7 +239,7 @@ class TextEncodeQwenImage21GH:
                 else:
                     prepared = _resize_image(image, width, height, "center")
             else:
-                width, height = _rounded_area_size(image.shape[2], image.shape[1], target_area)
+                width, height = _area_limited_size(image.shape[2], image.shape[1], target_area)
                 crop = "center" if index == 1 else "disabled"
                 prepared = _resize_image(image, width, height, crop)
 

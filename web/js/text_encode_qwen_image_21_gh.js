@@ -45,10 +45,15 @@ function syncImageInputs(node) {
     }
 
     inputs.forEach(({ slot }, index) => {
-        slot.label = `参考图 ${index + 1}`;
+        slot.label = `图像 ${index + 1}`;
         slot.type = "IMAGE";
     });
     node.setDirtyCanvas?.(true, true);
+}
+
+function labelReferenceSize(node) {
+    const slot = (node.inputs || []).find((input) => input?.name === "ref_image_size");
+    if (slot) slot.label = "参考图尺寸";
 }
 
 function scheduleSync(node) {
@@ -68,18 +73,21 @@ app.registerExtension({
         const originalCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             originalCreated?.apply(this, arguments);
+            labelReferenceSize(this);
             scheduleSync(this);
         };
 
         const originalConnections = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function () {
             originalConnections?.apply(this, arguments);
+            labelReferenceSize(this);
             scheduleSync(this);
         };
 
         const originalConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             originalConfigure?.apply(this, arguments);
+            labelReferenceSize(this);
             scheduleSync(this);
         };
     },

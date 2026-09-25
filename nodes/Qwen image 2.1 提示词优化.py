@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import threading
 import sys
 from pathlib import Path
 
@@ -11,24 +9,20 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from resources.qwen_image_model_scan import select_models  # noqa: E402
-from resources.qwen_image_runtime import (  # noqa: E402
+from resources.qwen_image_model_scan import select_models
+from resources.qwen_image_runtime import (
     I2I_SYSTEM_PROMPT,
+    REVERSE_SYSTEM_PROMPT,
     T2I_SYSTEM_PROMPT,
     QwenImageRuntime,
     append_transparency,
     collect_images,
     prompt_text_from_result,
     json_text_from_result,
-    random_seed,
     reverse_prompt_instruction,
     rewrite_user_prompt_for_transparency,
     _rewrite_language_rules,
 )
-
-
-_SEED_LOCK = threading.RLock()
-_LAST_SEEDS: dict[str, int] = {}
 
 
 def _models_dir() -> str:
@@ -78,14 +72,14 @@ class QwenImagePromptOptimizer:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("prompt", "json")
+    RETURN_TYPES = ("STRING", "STRING", "BOOLEAN")
+    RETURN_NAMES = ("prompt", "json", "是否反推")
     FUNCTION = "optimize"
     CATEGORY = "孤海工具箱/提示词"
 
     @classmethod
-    def IS_CHANGED(cls, 种子模式="固定", **kwargs):
-        return float("nan") if 种子模式 == "随机" else None
+    def IS_CHANGED(cls, 种子值=0, **kwargs):
+        return max(0, min(0xFFFFFFFF, int(种子值)))
 
     def optimize(
         self,
@@ -101,24 +95,19 @@ class QwenImagePromptOptimizer:
         unique_id=None,
         **kwargs,
     ):
-        # Keep older saved workflows usable after the two selector changes.
-        if isinstance(种子值, str) and 种子值 in {"固定", "随机"}:
-            if 种子模式 == "固定":
-                种子模式 = 种子值
-            种子值 = 0
         if isinstance(卸载模型, bool):
             卸载模型 = "运行后自动卸载" if 卸载模型 else "保持加载"
         images = collect_images(kwargs)
         has_images = bool(images)
-        # Empty user prompt plus valid images is reverse prompting. It uses the
-        # I2I PE model as requested, while keeping the T2I reverse-description
-        # task and output fields.
         reverse_mode = has_images and not str(用户提示词 or "").strip()
+        first_image_only = (
+            reverse_mode
+            and len(images) == 1
+            and any(kwargs.get(name) is not None for name in ("图像_01", "image_01"))
+        )
         if reverse_mode:
-            # 有图但没有用户指令时仍执行“图像反推”，但按要求使用图生图
-            # PE 模型；任务类型仍保持 T2I 反推格式，输出可用于文生图的提示词。
-            model_display = 图生图模型
-            base_system = T2I_SYSTEM_PROMPT
+            model_display = 文生图模型
+            base_system = REVERSE_SYSTEM_PROMPT
             prompt_input = reverse_prompt_instruction(bool(透明背景))
         elif has_images:
             model_display = 图生图模型
@@ -129,32 +118,20 @@ class QwenImagePromptOptimizer:
             base_system = T2I_SYSTEM_PROMPT
             prompt_input = str(用户提示词 or "").strip()
 
-        # 透明背景必须在用户指令进入模型前参与语义处理。显式的“把 A
-        # 背景改成 B”只替换目标 B，保留 A 作为原图中的待替换条件；普通
-        # 独立背景描述才直接改成透明背景。
         if 透明背景 and not reverse_mode:
             prompt_input = rewrite_user_prompt_for_transparency(用户提示词, True)
 
-        # 使用节点内置的完整 Qwen Image 原生系统提示词。它包含官方的
-        # 构图、位置、材质、文字、比例和图像编辑规则，不能为了性能压缩。
         system_prompt = _rewrite_language_rules(
             base_system,
             输出语言,
             str(用户提示词 or ""),
             transparent_background=bool(透明背景),
+            reverse_mode=reverse_mode,
         )
         model_path = _resolve(model_display, mmproj=False)
-        # Qwen35ChatHandler 即使 T2I 不传图也需要 mmproj 才能正确套用
-        # Qwen3.5 chat template；无图时不会向消息中加入 image_url。
         mmproj_path = _resolve(视觉模型, mmproj=True)
 
-        key = str(unique_id or id(self))
-        with _SEED_LOCK:
-            if 种子模式 == "随机":
-                seed = random_seed()
-            else:
-                seed = max(0, min(0xFFFFFFFF, int(种子值)))
-            _LAST_SEEDS[key] = seed
+        seed = max(0, min(0xFFFFFFFF, int(种子值)))
 
         result = QwenImageRuntime.complete(
             model_path=model_path,
@@ -165,6 +142,8 @@ class QwenImagePromptOptimizer:
             prompt_mode="I2I" if (has_images and not reverse_mode) else "T2I",
             seed=seed,
             unload_mode=卸载模型,
+            reverse_mode=reverse_mode,
+            reverse_resize_2048=first_image_only,
             output_language=输出语言,
             original_user_prompt=str(用户提示词 or ""),
             transparent_background=bool(透明背景),
@@ -174,6 +153,7 @@ class QwenImagePromptOptimizer:
             "result": (
                 prompt_text_from_result(result, bool(透明背景)),
                 json_text_from_result(result, bool(透明背景)),
+                reverse_mode,
             ),
         }
 

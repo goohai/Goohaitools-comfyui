@@ -5,6 +5,8 @@ const NODE_NAME = "QwenImagePromptOptimizer";
 const PROMPT_HEIGHT_PROPERTY = "qwen_prompt_height";
 const MIN_PROMPT_HEIGHT = 64;
 const SEED_WIDGET_NAMES = new Set(["种子值", "seed"]);
+const SEED_MODE_WIDGET_NAMES = new Set(["种子模式", "seed_mode"]);
+const LAST_SEED_MODE_PROPERTY = "goohai_last_executed_seed_mode";
 const imageName = (index) => `图像_${String(index + 1).padStart(2, "0")}`;
 const isImageInput = (slot) => {
     const name = String(slot?.name || "");
@@ -26,6 +28,70 @@ function updateSeedWidget(node, seed) {
     widget.callback?.(widget.value);
 }
 
+function widgetValue(node, names) {
+    return node.widgets?.find((item) => names.has(item.name))?.value;
+}
+
+function nextRandomSeed() {
+    if (globalThis.crypto?.getRandomValues) {
+        const value = new Uint32Array(1);
+        globalThis.crypto.getRandomValues(value);
+        return Number(value[0]) || 1;
+    }
+    return (Math.floor(Math.random() * 0xFFFFFFFF) + 1) >>> 0;
+}
+
+function prepareRuntimeSeeds() {
+    const nodes = app.graph?._nodes || app.graph?._nodes_by_id && Object.values(app.graph._nodes_by_id) || [];
+    for (const node of nodes) {
+        if (node?.comfyClass !== NODE_NAME && node?.type !== NODE_NAME) continue;
+        const mode = widgetValue(node, SEED_MODE_WIDGET_NAMES);
+        if (mode === "随机") updateSeedWidget(node, nextRandomSeed());
+    }
+}
+
+function prepareRuntimeSeedModes() {
+    const nodes = app.graph?._nodes || app.graph?._nodes_by_id && Object.values(app.graph._nodes_by_id) || [];
+    const restores = [];
+    for (const node of nodes) {
+        if (node?.comfyClass !== NODE_NAME && node?.type !== NODE_NAME) continue;
+        const widget = node.widgets?.find((item) => SEED_MODE_WIDGET_NAMES.has(item.name));
+        if (!widget) continue;
+        const selectedMode = widget.value;
+        const lastExecutedMode = node._goohaiLastExecutedSeedMode
+            || node.properties?.[LAST_SEED_MODE_PROPERTY];
+        const queuedMode = selectedMode === "固定"
+            && lastExecutedMode === "随机"
+            ? "随机"
+            : selectedMode;
+        node._goohaiQueuedSeedMode = selectedMode;
+        if (queuedMode !== selectedMode) {
+            widget.value = queuedMode;
+            restores.push(() => { widget.value = selectedMode; });
+        }
+    }
+    return restores;
+}
+
+function installQueueSeedHook() {
+    if (app._goohaiQwenRuntimeSeedHook) return;
+    if (typeof app.queuePrompt !== "function") {
+        setTimeout(installQueueSeedHook, 250);
+        return;
+    }
+    const originalQueuePrompt = app.queuePrompt;
+    app.queuePrompt = async function () {
+        prepareRuntimeSeeds();
+        const restores = prepareRuntimeSeedModes();
+        try {
+            return await originalQueuePrompt.apply(this, arguments);
+        } finally {
+            for (const restore of restores.reverse()) restore();
+        }
+    };
+    app._goohaiQwenRuntimeSeedHook = true;
+}
+
 function asPromptHeight(value, fallback) {
     const number = Number(value);
     return Number.isFinite(number) ? Math.max(MIN_PROMPT_HEIGHT, Math.round(number)) : fallback;
@@ -38,8 +104,6 @@ function measurePromptLayout(node, widget) {
         return null;
     }
 
-    // Measure the native layout before replacing the multiline widget's size.
-    // This gives us the fixed height occupied by inputs, outputs and selectors.
     const currentComputeSize = widget.computeSize;
     widget.computeSize = originalWidgetComputeSize;
     const naturalWidgetSize = originalWidgetComputeSize.call(widget, node.size?.[0]) || [0, 160];
@@ -139,6 +203,7 @@ app.registerExtension({
     name: "goohaitools.qwen_image_prompt_optimizer",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== NODE_NAME) return;
+        installQueueSeedHook();
         const originalCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             originalCreated?.apply(this, arguments);
@@ -176,6 +241,11 @@ app.registerExtension({
             originalExecuted?.apply(this, arguments);
             const seed = Array.isArray(message?.seed) ? message.seed[0] : message?.seed;
             updateSeedWidget(this, seed);
+            if (this._goohaiQueuedSeedMode) {
+                this._goohaiLastExecutedSeedMode = this._goohaiQueuedSeedMode;
+                this.properties = this.properties || {};
+                this.properties[LAST_SEED_MODE_PROPERTY] = this._goohaiQueuedSeedMode;
+            }
         };
     },
 });
