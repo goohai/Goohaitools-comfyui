@@ -71,7 +71,7 @@ class GuHaiIDPhotoCrop:
 
             },
             "optional": {
-                "自定义填充色": ("COLORCODE", {"default": "#364254"}),
+                "自定义填充色": ("GHCOLOR", {"default": "#364254"}),
             }
         }
 

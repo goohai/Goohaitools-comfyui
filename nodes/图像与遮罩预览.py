@@ -20,13 +20,13 @@ class ImageMaskPreview_Guhai:
                 "图像": ("IMAGE",),
                 "遮罩": ("MASK",),
                 "遮罩不透明": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.1}),
-                "遮罩颜色": ("COLORCODE", {"default": "#00ffff"}),
+                "遮罩颜色": ("GHCOLOR", {"default": "#00ffff"}),
                 "显示序号": ("BOOLEAN", {"default": False}),
                 "序号不透明": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.1}),
                 "序号缩放": (["跟随遮罩缩放", "固定大小"], {"default": "跟随遮罩缩放"}),
                 "字号比例": ("FLOAT", {"default": 0.6, "min": 0.1, "max": 2.0, "step": 0.1}),
                 "序号字体": (fonts, {"default": "苹方特粗.ttf"}),
-                "序号颜色": ("COLORCODE", {"default": "#ffffff"}),
+                "序号颜色": ("GHCOLOR", {"default": "#ffffff"}),
             }
         }
 

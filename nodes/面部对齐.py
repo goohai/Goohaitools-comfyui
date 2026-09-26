@@ -47,7 +47,7 @@ class GuHaiFaceAlignment:
             },
             "optional": {
                 "参考图": ("IMAGE",),
-                "自定义填充色": ("COLORCODE", {"default": "#364254"}),
+                "自定义填充色": ("GHCOLOR", {"default": "#364254"}),
             }
         }
     

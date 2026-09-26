@@ -22,7 +22,7 @@ class ColorConverterGuhai:
             }
         }
     
-    RETURN_TYPES = ("STRING", "COLORCODE")
+    RETURN_TYPES = ("STRING", "GHCOLOR")
     RETURN_NAMES = ("字符串", "颜色控件")
     FUNCTION = "convert_color"
     CATEGORY = "孤海工具箱"
@@ -145,12 +145,12 @@ class 取色器_孤海:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "颜色": ("COLORCODE", {"default": "#213d50"}),
+                "颜色": ("GHCOLOR", {"default": "#213d50"}),
                 "模式": (["HEX", "RGB", "HSL"], {"default": "HEX"}),
             },
         }
     
-    RETURN_TYPES = ("COLORCODE", "STRING")
+    RETURN_TYPES = ("GHCOLOR", "STRING")
     RETURN_NAMES = ("颜色控件", "字符串")
     FUNCTION = "获取颜色"
     CATEGORY = "孤海工具箱"
@@ -236,8 +236,8 @@ class 孤海取色器:
         return {
             "required": {
                 "模式": (["纯色", "上下渐变", "中心渐变"], {"default": "纯色"}),
-                "主色": ("COLORCODE", {"default": "#213d50"}),
-                "辅色": ("COLORCODE", {"default": "#402633"})
+                "主色": ("GHCOLOR", {"default": "#213d50"}),
+                "辅色": ("GHCOLOR", {"default": "#402633"})
             }
         }
     
@@ -277,8 +277,8 @@ class 孤海自定义颜色:
                 "宽度": ("INT", {"default": 512, "min": 1, "max": 8192}),
                 "高度": ("INT", {"default": 512, "min": 1, "max": 8192}),
                 "模式": (["纯色", "上下渐变", "中心渐变"], {"default": "纯色"}),
-                "颜色1": ("COLORCODE", {"default": "#364254"}),
-                "颜色2": ("COLORCODE", {"default": "#4C3843"}),
+                "颜色1": ("GHCOLOR", {"default": "#364254"}),
+                "颜色2": ("GHCOLOR", {"default": "#4C3843"}),
                 "缩放": ("INT", {"default": 100, "min": 0, "max": 300, "step": 1}),
                 "颗粒": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
             },

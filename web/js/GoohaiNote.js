@@ -212,7 +212,7 @@ class TextEditorNode extends TextEditorBaseNode {
         this.flags = this.flags || {};
         this.flags.allow_interaction = !this.flags.pinned;
         this.properties = {
-            text: "双击编辑文本内容...",
+            text: "双击编辑文本，右键滑动调整大小...",
             fontSize: 24,
             fontColor: "#C8C8C8",
             backgroundColor: "#1B4669",
@@ -224,7 +224,7 @@ class TextEditorNode extends TextEditorBaseNode {
             stroke: true
         };
         this.resizable = true;
-        this.size = [360, 100];
+        this.size = [700, 80];
         this.color = "#fff0";
         this.bgcolor = "transparent";
         this.isEditing = false;
@@ -316,13 +316,110 @@ class TextEditorNode extends TextEditorBaseNode {
         const TOOLBAR_OFFSET = 210;
 
         this.editToolbar = document.createElement("div");
+        this.editToolbar.className = "goohai-note-toolbar";
         Object.assign(this.editToolbar.style, {
             position: "absolute",
             left: rect.left + ox + "px",
             top: rect.top + oy - TOOLBAR_OFFSET + "px",
             width: "373px", display: "flex", flexDirection: "column",
-            gap: "8px", zIndex: "1001", fontSize: "12px", color: "#ffffff"
+            gap: "8px", zIndex: "999", fontSize: "12px", color: "#ffffff",
+            backgroundColor: "rgba(24, 48, 55, 0.5)", border: "1px solid rgba(91, 190, 199, 0.48)",
+            borderRadius: "10px", padding: "10px 12px", boxSizing: "border-box",
+            boxShadow: "0 8px 24px rgba(0, 0, 0, 0.42)",
+            backdropFilter: "blur(24px) saturate(150%)", WebkitBackdropFilter: "blur(24px) saturate(150%)",
+            visibility: "hidden"
         });
+
+        if (!document.getElementById("goohai-note-toolbar-style")) {
+            const toolbarStyle = document.createElement("style");
+            toolbarStyle.id = "goohai-note-toolbar-style";
+            toolbarStyle.textContent = `
+                .goohai-note-toolbar button {
+                    border: 0 !important;
+                    box-shadow: none !important;
+                    outline: none !important;
+                    background: rgba(255,255,255,.12) !important;
+                    transition: background-color .12s ease, transform .12s ease;
+                }
+                .goohai-note-toolbar button:hover { background: rgba(91,190,199,.34) !important; }
+                .goohai-note-toolbar button:active { transform: translateY(1px); }
+                .goohai-note-toolbar button.is-active {
+                    background: rgba(83,183,195,.34) !important;
+                    color: #6ed2dc !important;
+                    box-shadow: 0 0 0 1px rgba(137,225,232,.46) inset !important;
+                }
+                .goohai-note-toolbar button.is-active:hover {
+                    background: rgba(83,183,195,.48) !important;
+                }
+                .goohai-note-toolbar input[type="color"] {
+                    appearance: none;
+                    -webkit-appearance: none;
+                    width: 56px;
+                    height: 24px;
+                    padding: 0;
+                    border: 0 !important;
+                    border-radius: 4px;
+                    background: transparent !important;
+                    box-shadow: none !important;
+                    overflow: hidden;
+                    cursor: pointer;
+                }
+                .goohai-note-toolbar input[type="color"]::-webkit-color-swatch-wrapper {
+                    padding: 0;
+                }
+                .goohai-note-toolbar input[type="color"]::-webkit-color-swatch {
+                    border: 0;
+                    border-radius: 4px;
+                    box-shadow: inset 0 0 0 1px rgba(255,255,255,.24);
+                }
+                .goohai-note-toolbar input[type="color"]::-moz-color-swatch {
+                    border: 0;
+                    border-radius: 4px;
+                    box-shadow: inset 0 0 0 1px rgba(255,255,255,.24);
+                }
+                .goohai-note-toolbar input[type="range"] {
+                    appearance: none;
+                    -webkit-appearance: none;
+                    border: 0 !important;
+                    outline: none !important;
+                    box-shadow: none !important;
+                    background: transparent !important;
+                    height: 18px;
+                }
+                .goohai-note-toolbar input[type="range"]::-webkit-slider-runnable-track {
+                    height: 4px;
+                    border: 0;
+                    border-radius: 999px;
+                    background: rgba(214,236,239,.28);
+                }
+                .goohai-note-toolbar input[type="range"]::-webkit-slider-thumb {
+                    appearance: none;
+                    -webkit-appearance: none;
+                    width: 15px;
+                    height: 15px;
+                    margin-top: -5.5px;
+                    border: 0;
+                    border-radius: 50%;
+                    background: #53b7c3;
+                    box-shadow: 0 1px 5px rgba(0,0,0,.28);
+                }
+                .goohai-note-toolbar input[type="range"]::-moz-range-track {
+                    height: 4px;
+                    border: 0;
+                    border-radius: 999px;
+                    background: rgba(214,236,239,.28);
+                }
+                .goohai-note-toolbar input[type="range"]::-moz-range-thumb {
+                    width: 15px;
+                    height: 15px;
+                    border: 0;
+                    border-radius: 50%;
+                    background: #53b7c3;
+                    box-shadow: 0 1px 5px rgba(0,0,0,.28);
+                }
+            `;
+            document.head.appendChild(toolbarStyle);
+        }
 
         const alignRow = document.createElement("div");
         Object.assign(alignRow.style, { display: "flex", alignItems: "center", gap: "8px" });
@@ -354,6 +451,7 @@ class TextEditorNode extends TextEditorBaseNode {
             this.alignButtons[opt.key] = btn;
             alignRow.appendChild(btn);
         });
+        this.updateAlignButtons();
 
         const strokeCtrl = document.createElement("div");
         Object.assign(strokeCtrl.style, {
@@ -402,8 +500,8 @@ class TextEditorNode extends TextEditorBaseNode {
         this.textColorPicker = document.createElement("input");
         this.textColorPicker.type = "color";
         this.textColorPicker.value = this.properties.fontColor;
-        Object.assign(this.textColorPicker.style, { width: "56px", height: "24px", border: "none", borderRadius: "3px", cursor: "pointer" });
-        this.textColorPicker.addEventListener("change", (e) => {
+        Object.assign(this.textColorPicker.style, { width: "56px", height: "24px", border: "0", borderRadius: "4px", padding: "0", cursor: "pointer" });
+        this.textColorPicker.addEventListener("input", (e) => {
             this.properties.fontColor = e.target.value;
             this.updateTextareaStyle();
             app.graph.setDirtyCanvas(true);
@@ -423,18 +521,21 @@ class TextEditorNode extends TextEditorBaseNode {
         this.fontSizeSlider.type = "range";
         this.fontSizeSlider.min = "8";
         this.fontSizeSlider.max = "200";
-        this.fontSizeSlider.value = this.properties.fontSize;
+        this.fontSizeSlider.step = "1";
+        this.fontSizeSlider.value = Math.round(this.properties.fontSize);
         Object.assign(this.fontSizeSlider.style, { flex: "1", height: "20px" });
         this.fontSizeSlider.addEventListener("input", (e) => {
-            this.properties.fontSize = parseInt(e.target.value);
-            this.fontSizeValue.textContent = this.properties.fontSize;
+            this.properties.fontSize = parseInt(e.target.value, 10);
+            this.fontSizeValue.textContent = String(Math.round(this.properties.fontSize));
+            this.ensureTextFitsBackground();
             this.updateTextareaStyle();
+            this.updateEditorsPosition?.();
             app.graph.setDirtyCanvas(true);
         });
         textRow.appendChild(this.fontSizeSlider);
 
         this.fontSizeValue = document.createElement("span");
-        this.fontSizeValue.textContent = this.properties.fontSize;
+        this.fontSizeValue.textContent = String(Math.round(this.properties.fontSize));
         Object.assign(this.fontSizeValue.style, { fontSize: "12px", minWidth: "25px", textAlign: "right" });
         textRow.appendChild(this.fontSizeValue);
         this.editToolbar.appendChild(textRow);
@@ -451,8 +552,8 @@ class TextEditorNode extends TextEditorBaseNode {
         this.bgColorPicker = document.createElement("input");
         this.bgColorPicker.type = "color";
         this.bgColorPicker.value = this.properties.backgroundColor;
-        Object.assign(this.bgColorPicker.style, { width: "56px", height: "24px", border: "none", borderRadius: "3px", cursor: "pointer" });
-        this.bgColorPicker.addEventListener("change", (e) => {
+        Object.assign(this.bgColorPicker.style, { width: "56px", height: "24px", border: "0", borderRadius: "4px", padding: "0", cursor: "pointer" });
+        this.bgColorPicker.addEventListener("input", (e) => {
             this.properties.backgroundColor = e.target.value;
             this.updateTextareaStyle();
             app.graph.setDirtyCanvas(true);
@@ -556,13 +657,60 @@ class TextEditorNode extends TextEditorBaseNode {
             height: (this.size[1] - 20) * canvas.ds.scale + "px",
             fontFamily: getComfyUIFont(),
             border: "none", borderRadius: "0px", outline: "none",
+            background: "transparent", backgroundColor: "transparent",
             resize: "none", padding: "0px", boxSizing: "border-box",
-            zIndex: "1000", textAlign: this.properties.textAlign
+            zIndex: "1000", textAlign: this.properties.textAlign,
+            caretColor: this.properties.fontColor,
+            appearance: "none", WebkitAppearance: "none"
         });
         this.updateTextareaStyle();
+        this.editTextarea.style.setProperty("background", "transparent", "important");
+        this.editTextarea.style.setProperty("background-color", "transparent", "important");
+        this.editTextarea.style.setProperty("box-shadow", "none", "important");
         document.body.appendChild(this.editTextarea);
         this.editTextarea.focus();
         this.editTextarea.select();
+
+        const positionEditToolbar = () => {
+            if (!this.editToolbar) return;
+            const toolbarWidth = this.editToolbar.offsetWidth || 373;
+            const toolbarHeight = this.editToolbar.offsetHeight || 210;
+            const gap = 8;
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+            const c = LGraphCanvas.active_canvas;
+            const canvasRect = c.canvas.getBoundingClientRect();
+            const scale = c.ds.scale;
+            const nodeLeft = canvasRect.left + (this.pos[0] + c.ds.offset[0]) * scale;
+            const nodeTop = canvasRect.top + (this.pos[1] + c.ds.offset[1]) * scale;
+            const nodeRight = nodeLeft + this.size[0] * scale;
+            const nodeBottom = nodeTop + this.size[1] * scale;
+
+            const candidates = [
+                [nodeLeft, nodeTop - toolbarHeight - gap],
+                [nodeLeft, nodeBottom + gap],
+                [nodeRight + gap, nodeTop],
+                [nodeLeft - toolbarWidth - gap, nodeTop]
+            ];
+            let chosen = candidates.find(([left, top]) =>
+                left >= 0 && top >= 0 &&
+                left + toolbarWidth <= viewportWidth &&
+                top + toolbarHeight <= viewportHeight &&
+                !(left < nodeRight && left + toolbarWidth > nodeLeft &&
+                    top < nodeBottom && top + toolbarHeight > nodeTop)
+            );
+            if (!chosen) chosen = candidates[1];
+            const left = Math.max(4, Math.min(chosen[0], viewportWidth - toolbarWidth - 4));
+            const top = Math.max(4, Math.min(chosen[1], viewportHeight - toolbarHeight - 4));
+            Object.assign(this.editToolbar.style, {
+                left: left + "px",
+                top: top + "px",
+                visibility: "visible"
+            });
+        };
+
+        this.positionEditToolbar = positionEditToolbar;
+        this.positionEditToolbar();
 
         const saveAndClose = () => {
             this.properties.text = this.editTextarea.value;
@@ -583,10 +731,7 @@ class TextEditorNode extends TextEditorBaseNode {
                 width: (this.size[0] - 2 * this.properties.padding) * c.ds.scale + "px",
                 height: (this.size[1] - 20) * c.ds.scale + "px"
             });
-            Object.assign(this.editToolbar.style, {
-                left: r.left + ox2 + "px",
-                top: r.top + oy2 - TOOLBAR_OFFSET + "px"
-            });
+            this.positionEditToolbar();
             this.updateTextareaStyle();
         };
 
@@ -632,6 +777,12 @@ class TextEditorNode extends TextEditorBaseNode {
             }, 100);
         });
 
+        this.editTextarea.addEventListener("input", () => {
+            this.ensureTextFitsBackground();
+            this.updateEditorsPosition();
+            app.graph.setDirtyCanvas(true);
+        });
+
         this.isEditing = true;
     }
 
@@ -642,7 +793,9 @@ class TextEditorNode extends TextEditorBaseNode {
             fontSize: this.properties.fontSize * s + "px",
             fontFamily: getComfyUIFont(),
             color: this.properties.fontColor,
-            backgroundColor: this.hexToRGBA(this.properties.backgroundColor, this.properties.backgroundAlpha),
+            background: "transparent",
+            backgroundColor: "transparent",
+            caretColor: this.properties.fontColor,
             textAlign: this.properties.textAlign,
             lineHeight: this.properties.lineHeight,
             paddingTop: "2px", paddingLeft: "0px", paddingRight: "0px", paddingBottom: "0px",
@@ -650,9 +803,30 @@ class TextEditorNode extends TextEditorBaseNode {
         });
     }
 
+    ensureTextFitsBackground() {
+        if (!this.editTextarea) return;
+        const canvas = LGraphCanvas.active_canvas;
+        const ctx = canvas?.canvas?.getContext?.("2d");
+        if (!ctx) return;
+        ctx.font = this.properties.fontSize + "px " + getComfyUIFont();
+        const processed = this.editTextarea.value
+            .replace(/\\n/g, "\n")
+            .replace(/\r\n/g, "\n")
+            .replace(/\r/g, "\n");
+        const lines = wrapCharList(ctx, buildCharList(parseSegments(processed)),
+            Math.max(1, this.size[0] - 2 * this.properties.padding));
+        const lineHeight = this.properties.fontSize * this.properties.lineHeight;
+        const requiredHeight = Math.ceil((Math.max(1, lines.length) - 1) * lineHeight + this.properties.fontSize + 20);
+        if (requiredHeight > this.size[1]) {
+            this.size[1] = requiredHeight;
+        }
+    }
+
     updateAlignButtons() {
         Object.keys(this.alignButtons).forEach((k) => {
-            this.alignButtons[k].style.backgroundColor = this.properties.textAlign === k ? "#459BAC" : "#444";
+            const active = this.properties.textAlign === k;
+            this.alignButtons[k].classList.toggle("is-active", active);
+            this.alignButtons[k].setAttribute("aria-pressed", active ? "true" : "false");
         });
     }
 
@@ -661,6 +835,7 @@ class TextEditorNode extends TextEditorBaseNode {
         if (this.editToolbar) { document.body.removeChild(this.editToolbar); this.editToolbar = null; }
         if (this.canvasUpdateInterval) { clearInterval(this.canvasUpdateInterval); this.canvasUpdateInterval = null; }
         if (this.documentClickHandler) { document.removeEventListener("click", this.documentClickHandler, true); this.documentClickHandler = null; }
+        this.positionEditToolbar = null;
         this.isEditing = false;
     }
 
@@ -675,7 +850,9 @@ class TextEditorNode extends TextEditorBaseNode {
         ctx.fillStyle = this.hexToRGBA(this.properties.backgroundColor, this.properties.backgroundAlpha);
         ctx.fill();
 
-        if (this.properties.stroke) {
+        const isSelected = !!this.selected;
+        const showStrongBorder = isSelected || this.isEditing;
+        if (this.properties.stroke || showStrongBorder) {
             const bgHex = this.properties.backgroundColor;
             const sr = Math.min(parseInt(bgHex.slice(1, 3), 16) + 80, 255);
             const sg = Math.min(parseInt(bgHex.slice(3, 5), 16) + 80, 255);
@@ -683,16 +860,8 @@ class TextEditorNode extends TextEditorBaseNode {
 
             ctx.beginPath();
             ctx.roundRect(0.5, 0.5, this.size[0] - 1, this.size[1] - 1, Math.max(r - 0.5, 0));
-            ctx.strokeStyle = "rgba(" + sr + "," + sg + "," + sb + "," + this.properties.backgroundAlpha + ")";
+            ctx.strokeStyle = "rgba(" + sr + "," + sg + "," + sb + "," + (showStrongBorder ? 1 : this.properties.backgroundAlpha) + ")";
             ctx.lineWidth = 1;
-            ctx.stroke();
-        }
-
-        if (this.isEditing) {
-            ctx.beginPath();
-            ctx.roundRect(0, 0, this.size[0], this.size[1], r);
-            ctx.strokeStyle = "#4CAF50";
-            ctx.lineWidth = 2;
             ctx.stroke();
         }
 
@@ -724,8 +893,9 @@ class TextEditorNode extends TextEditorBaseNode {
     onPropertyChanged(name, value) {
         if (this.isEditing) {
             if ("fontSize" === name && this.fontSizeSlider) {
-                this.fontSizeSlider.value = value;
-                this.fontSizeValue.textContent = value;
+                this.fontSizeSlider.value = Math.round(value);
+                this.fontSizeValue.textContent = String(Math.round(value));
+                this.ensureTextFitsBackground();
             } else if ("fontColor" === name && this.textColorPicker) {
                 this.textColorPicker.value = value;
             } else if ("backgroundColor" === name && this.bgColorPicker) {
@@ -751,6 +921,9 @@ class TextEditorNode extends TextEditorBaseNode {
     }
 
     onMouseDown(evt, pos) {
+        if (!this.isEditing && evt?.button === 2) {
+            beginFontResize(this, evt, pos);
+        }
         if (!this.isEditing && this.linkAreas && this.linkAreas.length > 0) {
             const lp = [pos[0] - this.pos[0], pos[1] - this.pos[1]];
             for (const a of this.linkAreas) {
@@ -815,8 +988,8 @@ TextEditorNode.title = "孤海注释";
 TextEditorNode.title_mode = LiteGraph.NO_TITLE;
 TextEditorNode.collapsable = false;
 
-TextEditorNode["@text"] = { type: "string", title: "文本内容", default: "双击编辑文本内容...", multiline: true };
-TextEditorNode["@fontSize"] = { type: "number", title: "字体大小", default: 24, min: 8, max: 200, step: 1 };
+TextEditorNode["@text"] = { type: "string", title: "文本内容", default: "双击编辑文本，右键滑动调整大小...", multiline: true };
+TextEditorNode["@fontSize"] = { type: "number", title: "字体大小", default: 24, min: 8, max: 200, step: 1, round: 1 };
 TextEditorNode["@fontColor"] = { type: "color", title: "字体颜色", default: "#C8C8C8" };
 TextEditorNode["@backgroundColor"] = { type: "color", title: "背景颜色", default: "#1B4669" };
 TextEditorNode["@backgroundAlpha"] = { type: "number", title: "背景透明度", default: 0.25, min: 0, max: 1, step: 0.05 };
@@ -831,7 +1004,12 @@ LGraphCanvas.prototype.drawNode = function (node, ctx) {
     if (node.constructor === TextEditorNode) {
         node.bgcolor = "transparent";
         node.color = "#fff0";
+        const wasSelected = !!node.selected;
+        // LiteGraph's default selection outline is drawn outside the node.
+        // Hide it temporarily; the node draws its own selected border instead.
+        if (wasSelected) node.selected = false;
         const result = _origDrawNode.apply(this, arguments);
+        if (wasSelected) node.selected = true;
         node.onDrawBackground(ctx);
         return result;
     }
@@ -845,6 +1023,11 @@ LGraphCanvas.prototype.processMouseDown = function (e) {
     const node = this.graph.getNodeOnPos(canvasPos[0], canvasPos[1], this.visible_nodes);
     if (node && node.constructor === TextEditorNode && !node.isEditing) {
         const lp = [canvasPos[0] - node.pos[0], canvasPos[1] - node.pos[1]];
+        if (e.button === 2 && beginFontResize(node, e, canvasPos)) {
+            // Keep LiteGraph's normal right-click menu for a click; the move
+            // handler below takes over only after the pointer actually moves.
+            this._goohaiFontResizeStarted = true;
+        }
         if (node.linkAreas && node.linkAreas.length > 0) {
             for (const a of node.linkAreas) {
                 if (lp[0] >= a.x && lp[0] <= a.x + a.width &&
@@ -884,6 +1067,150 @@ document.addEventListener("mousedown", function (e) {
 
 document.addEventListener("mouseup", function () {
     mouseState.processingMouseDown = false;
+}, true);
+
+// 非编辑状态下，按住右键左右滑动可快速等比缩放文字与背景框。
+// 右下角仍交给 LiteGraph 原生 resize 逻辑，只调整背景框尺寸。
+let fontResizeState = null;
+let suppressNoteContextMenuUntil = 0;
+
+function getTextNodeAtMouseEvent(e) {
+    const canvas = LGraphCanvas.active_canvas;
+    if (!canvas || !canvas.graph || !canvas.canvas) return null;
+    const rect = canvas.canvas.getBoundingClientRect();
+    const scale = canvas.ds?.scale || 1;
+    const offset = canvas.ds?.offset || [0, 0];
+    const canvasPos = [
+        (e.clientX - rect.left) / scale - offset[0],
+        (e.clientY - rect.top) / scale - offset[1]
+    ];
+    const nodes = canvas.visible_nodes || canvas.graph._nodes || [];
+    let node = canvas.graph.getNodeOnPos(canvasPos[0], canvasPos[1], nodes);
+    if (!node && Array.isArray(nodes)) {
+        for (let i = nodes.length - 1; i >= 0; i--) {
+            const candidate = nodes[i];
+            if (candidate?.constructor === TextEditorNode &&
+                canvasPos[0] >= candidate.pos[0] && canvasPos[0] <= candidate.pos[0] + candidate.size[0] &&
+                canvasPos[1] >= candidate.pos[1] && canvasPos[1] <= candidate.pos[1] + candidate.size[1]) {
+                node = candidate;
+                break;
+            }
+        }
+    }
+    if (!node || node.constructor !== TextEditorNode || node.isEditing) return null;
+    return { canvas, node, localX: canvasPos[0] - node.pos[0], localY: canvasPos[1] - node.pos[1] };
+}
+
+function beginFontResize(node, e, pos) {
+    if (!node || node.isEditing || e?.button !== 2) return false;
+    const localX = Array.isArray(pos) ? pos[0] - node.pos[0] : 0;
+    const localY = Array.isArray(pos) ? pos[1] - node.pos[1] : 0;
+    const resizeHandle = 22;
+    if (localX >= node.size[0] - resizeHandle && localY >= node.size[1] - resizeHandle) return false;
+    fontResizeState = {
+        node,
+        startX: e.clientX,
+        startFontSize: node.properties.fontSize,
+        startSize: [node.size[0], node.size[1]],
+        moved: false
+    };
+    return true;
+}
+
+document.addEventListener("mousedown", function (e) {
+    if (e.button !== 2) return;
+    const hit = getTextNodeAtMouseEvent(e);
+    if (!hit) return;
+
+    // Preserve the existing lower-right corner resize behavior.
+    if (!beginFontResize(hit.node, e, [hit.node.pos[0] + hit.localX, hit.node.pos[1] + hit.localY])) return;
+    if (LGraphCanvas.active_canvas?.canvas?.setPointerCapture && e.pointerId !== undefined) {
+        try { LGraphCanvas.active_canvas.canvas.setPointerCapture(e.pointerId); } catch (_) { }
+    }
+}, true);
+
+document.addEventListener("pointerdown", function (e) {
+    if (e.button !== 2 || fontResizeState) return;
+    const hit = getTextNodeAtMouseEvent(e);
+    if (!hit || !beginFontResize(hit.node, e, [hit.node.pos[0] + hit.localX, hit.node.pos[1] + hit.localY])) return;
+    if (LGraphCanvas.active_canvas?.canvas?.setPointerCapture && e.pointerId !== undefined) {
+        try { LGraphCanvas.active_canvas.canvas.setPointerCapture(e.pointerId); } catch (_) { }
+    }
+}, true);
+
+document.addEventListener("mousemove", function (e) {
+    updateFontResize(e);
+}, true);
+
+document.addEventListener("pointermove", function (e) {
+    if (fontResizeState && (e.buttons & 2)) updateFontResize(e);
+}, true);
+
+function updateFontResize(e) {
+    if (!fontResizeState) return false;
+    const state = fontResizeState;
+    const node = state.node;
+    if (!node || node.isEditing) {
+        fontResizeState = null;
+        return false;
+    }
+
+    const delta = e.clientX - state.startX;
+    if (Math.abs(delta) < 1) return false;
+    state.moved = true;
+
+    const nextFontSize = Math.max(8, Math.min(200, state.startFontSize + delta / 4));
+    const scale = nextFontSize / state.startFontSize;
+    node.properties.fontSize = nextFontSize;
+    node.size[0] = Math.max(5, state.startSize[0] * scale);
+    node.size[1] = Math.max(5, state.startSize[1] * scale);
+    node.setDirtyCanvas(true, true);
+    app.graph.setDirtyCanvas(true);
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+}
+
+const _origPMMove = LGraphCanvas.prototype.processMouseMove;
+if (typeof _origPMMove === "function") {
+    LGraphCanvas.prototype.processMouseMove = function (e) {
+        if (fontResizeState && updateFontResize(e)) return false;
+        return _origPMMove.apply(this, arguments);
+    };
+}
+
+const _origPMUp = LGraphCanvas.prototype.processMouseUp;
+if (typeof _origPMUp === "function") {
+    LGraphCanvas.prototype.processMouseUp = function (e) {
+        if (fontResizeState) {
+            if (fontResizeState.moved) suppressNoteContextMenuUntil = Date.now() + 300;
+            fontResizeState = null;
+            return false;
+        }
+        return _origPMUp.apply(this, arguments);
+    };
+}
+
+document.addEventListener("mouseup", function (e) {
+    if (fontResizeState?.moved) suppressNoteContextMenuUntil = Date.now() + 300;
+    if (fontResizeState && LGraphCanvas.active_canvas?.canvas?.releasePointerCapture) {
+        try { LGraphCanvas.active_canvas.canvas.releasePointerCapture(e.pointerId); } catch (_) { }
+    }
+    fontResizeState = null;
+}, true);
+
+document.addEventListener("pointerup", function () {
+    if (fontResizeState?.moved) suppressNoteContextMenuUntil = Date.now() + 300;
+    fontResizeState = null;
+}, true);
+
+document.addEventListener("contextmenu", function (e) {
+    if (Date.now() < suppressNoteContextMenuUntil || fontResizeState?.moved) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+    suppressNoteContextMenuUntil = 0;
+    fontResizeState = null;
 }, true);
 
 // Nodes 2.0 HTML VUE覆盖层双击穿透
