@@ -1,11 +1,12 @@
-﻿import { app } from "../../../scripts/app.js";
+import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 
-const MAX_EDIT_LONG_SIDE = 2000;
+const MAX_EDIT_LONG_SIDE = 1536;
 const EXT_NAME = "goohaitools.load_image_mask_editor";
 const pendingMaskSaves = new Set();
 const imageLoadCache = new Map();
 const editorImageCache = new Map();
+const colorPreviewCache = new Map();
 
 function clamp(v, min, max) {
     return Math.max(min, Math.min(max, v));
@@ -110,7 +111,49 @@ async function deflateBytes(bytes) {
     return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-async function rgbaToPngBlob(rgba, width, height) {
+async function inflateBytes(bytes) {
+    if (typeof DecompressionStream !== "function") throw new Error("当前浏览器不支持颜色层解码");
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function colorLayersPngChunk(layers, order, width, height) {
+    const bits = new Uint8Array(width * height);
+    for (let layerIndex = 0; layerIndex < order.length; layerIndex++) {
+        const canvas = layers.get(order[layerIndex]);
+        if (!canvas) continue;
+        const alpha = canvas.getContext("2d").getImageData(0, 0, width, height).data;
+        const bit = 1 << layerIndex;
+        for (let index = 0; index < bits.length; index++) if (alpha[index * 4 + 3] > 5) bits[index] |= bit;
+    }
+    const compressed = await deflateBytes(bits);
+    const payload = new Uint8Array(8 + compressed.length);
+    writeU32(payload, 0, width); writeU32(payload, 4, height); payload.set(compressed, 8);
+    return pngChunk("ghCL", payload);
+}
+
+async function readColorLayersChunk(url) {
+    if (!url) return null;
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) return null;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let offset = 8;
+    while (offset + 12 <= bytes.length) {
+        const length = ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
+        const type = new TextDecoder().decode(bytes.subarray(offset + 4, offset + 8));
+        if (type === "ghCL" && length >= 8) {
+            const data = bytes.subarray(offset + 8, offset + 8 + length);
+            const width = ((data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]) >>> 0;
+            const height = ((data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7]) >>> 0;
+            const bits = await inflateBytes(data.subarray(8));
+            return bits.length === width * height ? { width, height, bits } : null;
+        }
+        offset += 12 + length;
+    }
+    return null;
+}
+
+async function rgbaToPngBlob(rgba, width, height, extraChunks = []) {
     const stride = width * 4;
     const raw = new Uint8Array((stride + 1) * height);
     for (let y = 0; y < height; y++) {
@@ -129,6 +172,7 @@ async function rgbaToPngBlob(rgba, width, height) {
     const png = concatBytes([
         new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
         pngChunk("IHDR", ihdr),
+        ...extraChunks,
         pngChunk("IDAT", await deflateBytes(raw)),
         pngChunk("IEND"),
     ]);
@@ -160,27 +204,51 @@ function imageUrlFromParts(p) {
     return api.apiURL(`/view?${qs.toString()}`);
 }
 
+
+function outputStateFromFilename(filename) {
+    const match = String(filename || "").match(/__ghm-(original|color)-([a-z]+)-(\d{1,3})-([01])(?:-([01]))?(?:-goohai)?(?:\.[^.]+)?$/i);
+    if (!match) return null;
+    return {
+        mode: match[1].toLowerCase() === "color" ? "color" : "original",
+        color: match[2].toLowerCase(),
+        opacity: clamp(Number(match[3]), 0, 100),
+        fill: match[4] === "1",
+        inverted: match[5] === "1",
+    };
+}
+
 function getEditorSources(value) {
     const parsed = parseImageValue(value);
     const isClipMask = parsed.filename.includes("painted-masked");
+    const isSavedOutput = parsed.filename.includes("painted-output-");
     const isOfficialClipMask = parsed.filename.startsWith("clipspace-mask-");
-    if (!isClipMask && !isOfficialClipMask) {
+    if (!isClipMask && !isSavedOutput && !isOfficialClipMask) {
         return {
             imageUrl: imageUrlFromParts(parsed),
             maskUrl: imageUrlFromParts(parsed),
             maskMode: "alpha",
+            outputState: outputStateFromFilename(parsed.filename),
         };
     }
     const original = {
         ...parsed,
         filename: isOfficialClipMask
             ? parsed.filename.replace("clipspace-mask-", "clipspace-painted-")
-            : parsed.filename.replace("painted-masked", "painted"),
+            : isSavedOutput
+                ? parsed.filename.split("__ghm-", 1)[0].replace("painted-output-", "painted-") + ".png"
+                : parsed.filename.replace("painted-masked", "painted"),
     };
+    const mask = isSavedOutput
+        ? { ...parsed, filename: parsed.filename.split("__ghm-", 1)[0].replace("painted-output-", "painted-masked-") + ".png" }
+        : parsed;
     return {
         imageUrl: imageUrlFromParts(original),
-        maskUrl: imageUrlFromParts(parsed),
+        maskUrl: imageUrlFromParts(mask),
+        colorUrl: isSavedOutput
+            ? imageUrlFromParts({ ...parsed, filename: parsed.filename.split("__ghm-", 1)[0].replace("painted-output-", "painted-masked-") + ".png" })
+            : isClipMask ? imageUrlFromParts(parsed) : null,
         maskMode: "clipspace-alpha",
+        outputState: outputStateFromFilename(parsed.filename),
     };
 }
 
@@ -286,19 +354,38 @@ function injectStyles() {
 .guhai-mask-tools-right{justify-content:flex-start;padding-left:220px}
 .guhai-mask-brush-hint{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:12px;font-weight:700;color:#487d7d;white-space:nowrap;pointer-events:none}
 .guhai-mask-segment{display:flex;overflow:hidden;border:1px solid #454b56;border-radius:999px;background:#181a1f}
-.guhai-mask-btn{border:0;background:transparent;color:#c6cbd3;font-size:12px;font-weight:700;padding:7px 12px;cursor:pointer;line-height:1;white-space:nowrap}
+.guhai-mask-btn{border:0;background:transparent;color:#c6cbd3;font-size:14px;font-weight:700;padding:7px 12px;cursor:pointer;line-height:1;white-space:nowrap}
 .guhai-mask-btn:hover{background:#2b3038;color:#fff}
 .guhai-mask-btn.active{background:#45c7bf;color:white}
 .guhai-mask-icon-btn{width:30px;height:30px;border-radius:999px;border:1px solid transparent;background:transparent;color:#c6cbd3;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;font-weight:800}
 .guhai-mask-icon-btn:hover{background:#2b3038;color:#fff}
 .guhai-mask-icon-btn:disabled{opacity:.35;cursor:default}
-.guhai-mask-action{height:30px;border-radius:999px;border:1px solid #4a5260;background:transparent;color:#d7dbe2;font-size:12px;font-weight:700;padding:0 12px;cursor:pointer}
+.guhai-mask-action{height:30px;border-radius:999px;border:1px solid #4a5260;background:transparent;color:#d7dbe2;font-size:14px;font-weight:700;padding:0 12px;cursor:pointer}
 .guhai-mask-action:hover{background:#2b3038;color:#fff}
-.guhai-mask-primary{height:30px;border-radius:999px;border:0;background:#45c7bf;color:white;font-size:12px;font-weight:800;padding:0 16px;cursor:pointer;box-shadow:0 3px 12px rgba(69,199,191,.35)}
+.guhai-mask-primary{height:30px;border-radius:999px;border:0;background:#45c7bf;color:white;font-size:14px;font-weight:800;padding:0 16px;cursor:pointer;box-shadow:0 3px 12px rgba(69,199,191,.35)}
 .guhai-mask-primary:hover{background:#55d8d0}
 .guhai-mask-swatch{width:20px;height:20px;border-radius:50%;border:1px solid #626a78;cursor:pointer;opacity:.75}
 .guhai-mask-swatch.active{outline:2px solid #45c7bf;outline-offset:2px;opacity:1;transform:scale(1.06)}
 .guhai-mask-stage{position:relative;flex:1;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#111318;cursor:none}
+.guhai-mask-output-panel{position:absolute;left:14px;top:14px;z-index:12;display:flex;flex-direction:column;gap:12px;width:222px;padding:10px;color:#dce2ea;font-size:14px;user-select:none;cursor:pointer;background:rgba(8,58,62,.4);border:1px solid rgba(77,174,177,.2);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.28),0 2px 8px rgba(0,0,0,.18);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.guhai-mask-output-row{display:flex;align-items:center;width:100%;min-height:24px}
+.guhai-mask-output-label{font-size:14px;font-weight:700;color:#b9c2ce;white-space:nowrap}
+.guhai-mask-output-segment{display:flex;width:100%;overflow:hidden;border:1px solid rgba(130,145,160,.65);border-radius:999px;background:rgba(18,22,28,.28)}
+.guhai-mask-output-btn{flex:1;border:0;background:transparent;color:#c7d0da;font-size:14px;padding:5px 9px;cursor:pointer;white-space:nowrap}
+.guhai-mask-output-btn.active{background:rgba(69,199,191,.78);color:#fff}
+.guhai-mask-output-swatches{display:flex;align-items:center;justify-content:space-between;width:100%}
+.guhai-mask-output-swatch{width:17px;height:17px;border-radius:50%;border:1px solid rgba(255,255,255,.7);cursor:pointer;opacity:.72;box-shadow:0 0 0 1px rgba(0,0,0,.25)}
+.guhai-mask-output-swatch.active{outline:2px solid #45c7bf;outline-offset:2px;opacity:1}
+.guhai-mask-output-opacity-row{flex-direction:column;align-items:stretch;gap:3px}
+.guhai-mask-output-opacity-head{display:flex;align-items:center;justify-content:space-between;width:100%}
+.guhai-mask-output-range{display:block;width:100%;height:16px;margin:0;accent-color:#45c7bf;cursor:pointer}
+.guhai-mask-output-value{font-size:14px;color:#c8d1dc;font-family:Consolas,monospace;text-align:right}
+.guhai-mask-output-check{display:grid;grid-template-columns:max-content minmax(0,1fr);align-items:center;width:100%;min-height:24px;cursor:pointer;color:#c7d0da;font-size:14px}
+.guhai-mask-output-check input{position:absolute;opacity:0;pointer-events:none}
+.guhai-mask-output-toggle{position:relative;width:46px;height:18px;justify-self:center;border-radius:999px;background:rgba(91,101,114,.72);box-shadow:inset 0 0 0 1px rgba(255,255,255,.2);transition:background .16s ease}
+.guhai-mask-output-toggle::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#d9dee5;box-shadow:0 1px 3px rgba(0,0,0,.45);transition:transform .16s ease,background .16s ease}
+.guhai-mask-output-check input:checked+.guhai-mask-output-toggle{background:#45c7bf}
+.guhai-mask-output-check input:checked+.guhai-mask-output-toggle::after{transform:translateX(28px);background:#fff}
 .guhai-mask-frame{position:relative;display:none;box-shadow:0 10px 32px rgba(0,0,0,.45);transform-origin:center center}
 .guhai-mask-frame img{display:block;max-width:90vw;max-height:calc(100vh - 110px);user-select:none;-webkit-user-drag:none}
 .guhai-mask-frame canvas.guhai-mask-paint{position:absolute;inset:0;width:100%;height:100%;opacity:.5;touch-action:none;pointer-events:none}
@@ -308,7 +395,22 @@ function injectStyles() {
 .guhai-mask-dims{position:absolute;left:0;right:0;top:100%;margin-top:6px;text-align:center;font-size:12px;color:#c8ccd3;font-family:"JetBrains Mono",Consolas,monospace;pointer-events:none}
 .guhai-mask-loading{position:absolute;color:#c6cbd3;font-size:14px}
 .guhai-mask-error{position:absolute;color:#ff9a9a;font-size:14px;max-width:70vw;text-align:center}
+.guhai-mask-color-menu{position:fixed;z-index:100000;display:flex;gap:5px;padding:7px;border:1px solid rgba(255,255,255,.22);border-radius:8px;background:rgba(18,22,28,.95);box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.guhai-mask-color-menu button{width:22px;height:22px;padding:0;border:1px solid rgba(255,255,255,.6);border-radius:50%;cursor:pointer;color:#fff;font-size:16px;line-height:18px}
 .guhai-mask-node-widget{display:flex;align-items:center;justify-content:center;gap:8px;color:#dfe6f3}
+.guhai-nodes2-load-toolbar{position:absolute;z-index:20;left:0;right:0;top:54px;width:auto;height:38px;box-sizing:border-box;display:block;pointer-events:none}
+.guhai-nodes2-load-toolbar button{flex:0 0 38px;width:38px;height:38px;padding:0;border:1.2px solid #788391;border-radius:50%;background:var(--guhai-node-button-bg,rgba(39,45,55,.94));box-shadow:0 2px 5px rgba(0,0,0,.28);color:#c1c5cd;font:700 11px/1 sans-serif;text-align:center;cursor:pointer;touch-action:none}
+.guhai-nodes2-load-toolbar button{position:absolute;top:0;transform:translateX(-50%);pointer-events:auto}
+.guhai-nodes2-load-toolbar button[data-action="upload"]{left:18%}
+.guhai-nodes2-load-toolbar button[data-action="transparent"]{left:35%}
+.guhai-nodes2-load-toolbar button[data-action="mask"]{left:52%}
+.guhai-nodes2-load-toolbar button[data-action="transparent"]{font-size:9px}
+.guhai-nodes2-load-toolbar button[data-action="transparent"]::before{content:"RGBA"}
+.guhai-nodes2-load-toolbar button:hover{border-color:#b6fffb;filter:brightness(1.14)}
+.guhai-nodes2-load-toolbar button.active{border-color:#72aaa8;background:rgba(31,111,108,.94)}
+[data-guhai-image-widget-row="true"]{display:flex!important;align-items:center!important;width:100%!important;max-width:none!important;gap:0!important}
+[data-guhai-image-widget-label="true"]{display:none!important}
+[data-guhai-image-widget-control="true"]{flex:1 1 100%!important;width:100%!important;max-width:none!important;min-width:0!important;margin-left:0!important}
 .guhai-mask-menu-entry{color:#18f0f0!important;background:rgba(0,184,184,.18)!important;font-weight:400!important}
 .litecontextmenu .guhai-mask-menu-entry:hover,.litemenu-entry.guhai-mask-menu-entry:hover{background:rgba(0,184,184,.18)!important;color:#18f0f0!important}
 @media (max-width:920px){
@@ -323,17 +425,31 @@ function injectStyles() {
 }
 
 class GoohaiMaskEditor {
-    constructor({ imageUrl, maskUrl, maskMode, preserveRgbUnderMask = false, onSave, onClose }) {
+    constructor({ imageUrl, maskUrl, colorUrl = null, maskMode, preserveRgbUnderMask = false, outputState = null, onSave, onClose }) {
         injectStyles();
         this.imageUrl = imageUrl;
         this.maskUrl = maskUrl;
+        this.colorUrl = colorUrl;
         this.maskMode = maskMode;
         this.preserveRgbUnderMask = preserveRgbUnderMask;
+        this.outputMode = outputState?.mode === "color" ? "color" : "original";
+        this.outputColor = outputState?.color || "red";
+        this.outputOpacity = clamp(Number(outputState?.opacity ?? 50), 0, 100);
+        this.autoFillHoles = !!outputState?.fill;
+        this.maskInverted = !!outputState?.inverted;
         this.onSave = onSave;
         this.onClose = onClose;
         this.tool = "brush";
-        this.brushColor = "green";
-        this.brushSize = 60;
+        this.maskBrushColor = "green";
+        this.brushColor = this.outputMode === "color" ? (this.outputColor || "red") : this.maskBrushColor;
+        this.brushSize = 30;
+        this.activePaintColor = this.brushColor;
+        this.maskModePaint = null;
+        this.colorModePaint = null;
+        this.colorModeInitialized = false;
+        this.maskModeBasePaint = null;
+        this.maskModeChangesDirty = false;
+        this.fillRevision = 0;
         this.scale = 1;
         this.offset = { x: 0, y: 0 };
         this.isDrawing = false;
@@ -347,6 +463,7 @@ class GoohaiMaskEditor {
         this.rightResize = null;
         this.lastPos = null;
         this.lastMouse = null;
+        this.lastDrawClient = null;
         this.history = [];
         this.redo = [];
         this.marqueeRects = [];
@@ -375,7 +492,7 @@ class GoohaiMaskEditor {
         this.root.className = "guhai-mask-root";
         this.root.tabIndex = -1;
         this.root.innerHTML = `
-            <textarea class="guhai-mask-keyboard-sink" aria-hidden="true"></textarea>
+            <textarea class="guhai-mask-keyboard-sink" aria-hidden="true" readonly spellcheck="false" inputmode="none"></textarea>
             <div class="guhai-mask-toolbar">
                 <div class="guhai-mask-tools-left">
                     <div class="guhai-mask-segment">
@@ -386,7 +503,7 @@ class GoohaiMaskEditor {
                     <button class="guhai-mask-swatch active" data-color="green" title="\u7eff\u8272"></button>
                     <button class="guhai-mask-swatch" data-color="white" title="\u767d\u8272"></button>
                     <button class="guhai-mask-swatch" data-color="black" title="\u9ed1\u8272"></button>
-                    <span class="guhai-mask-size">60px</span>
+                     <span class="guhai-mask-size">30px</span>
                 </div>
                 <div class="guhai-mask-brush-hint">\u9f20\u6807\u53f3\u952e\u5de6\u53f3\u62d6\u52a8\u8c03\u6574\u753b\u7b14\u5927\u5c0f</div>
                 <div class="guhai-mask-tools-right">
@@ -399,6 +516,38 @@ class GoohaiMaskEditor {
                 </div>
             </div>
             <div class="guhai-mask-stage">
+                <div class="guhai-mask-output-panel">
+                    <div class="guhai-mask-output-row">
+                        <div class="guhai-mask-output-segment">
+                            <button class="guhai-mask-output-btn" data-output-mode="original">仅遮罩</button>
+                            <button class="guhai-mask-output-btn" data-output-mode="color">颜色叠加</button>
+                        </div>
+                    </div>
+                    <div class="guhai-mask-output-row guhai-mask-output-color-row">
+                        <div class="guhai-mask-output-swatches">
+                            <button class="guhai-mask-output-swatch" data-output-color="white" title="白"></button>
+                            <button class="guhai-mask-output-swatch" data-output-color="red" title="红"></button>
+                            <button class="guhai-mask-output-swatch" data-output-color="orange" title="橙"></button>
+                            <button class="guhai-mask-output-swatch" data-output-color="yellow" title="黄"></button>
+                            <button class="guhai-mask-output-swatch" data-output-color="green" title="绿"></button>
+                            <button class="guhai-mask-output-swatch" data-output-color="cyan" title="青"></button>
+                            <button class="guhai-mask-output-swatch" data-output-color="blue" title="蓝"></button>
+                            <button class="guhai-mask-output-swatch" data-output-color="purple" title="紫"></button>
+                        </div>
+                    </div>
+                    <div class="guhai-mask-output-row guhai-mask-output-opacity-row">
+                        <div class="guhai-mask-output-opacity-head">
+                            <span class="guhai-mask-output-label">透明度</span>
+                            <span class="guhai-mask-output-value" data-output-opacity-value></span>
+                        </div>
+                        <input class="guhai-mask-output-range" data-output-opacity type="range" min="0" max="100" step="5" />
+                    </div>
+                    <label class="guhai-mask-output-check">
+                        <span>自动填充漏洞</span>
+                        <input data-output-fill type="checkbox" />
+                        <span class="guhai-mask-output-toggle" aria-hidden="true"></span>
+                    </label>
+                </div>
                 <div class="guhai-mask-loading">\u52a0\u8f7d\u4e2d...</div>
                 <div class="guhai-mask-frame">
                     <img draggable="false" />
@@ -421,9 +570,38 @@ class GoohaiMaskEditor {
         this.hint = this.root.querySelector(".guhai-mask-brush-hint");
         this.dims = this.root.querySelector(".guhai-mask-dims");
         this.shapeMask = document.createElement("canvas");
+        this.rawPaint = document.createElement("canvas");
+        // Keep the hand-painted mask as the source of truth. This in-memory
+        // canvas is only a display/save view for optional hole filling.
+        this.filledPaint = document.createElement("canvas");
+        this.filledPaintValid = false;
+        this.drawingPreviewPaint = null;
+        this.drawingPreviewRaf = 0;
+        this.outputOpacityInput = this.root.querySelector("[data-output-opacity]");
+        this.outputOpacityValue = this.root.querySelector("[data-output-opacity-value]");
+        this.outputPanel = this.root.querySelector(".guhai-mask-output-panel");
+        this.outputColorRow = this.root.querySelector(".guhai-mask-output-color-row");
+        this.outputOpacityRow = this.outputOpacityInput?.closest(".guhai-mask-output-row");
+        this.outputFillInput = this.root.querySelector("[data-output-fill]");
         for (const sw of this.root.querySelectorAll(".guhai-mask-swatch")) {
             sw.style.background = this.colors[sw.dataset.color];
         }
+        this.outputColors = {
+            white: "#ffffff", red: "#ff3030", orange: "#ff8c20", yellow: "#ffe52e",
+            green: "#28d66f", cyan: "#24d9d1", blue: "#347cff", purple: "#b04cff",
+        };
+        this.colorOrder = Object.keys(this.outputColors);
+        this.colorLayers = new Map();
+        this.filledColorLayers = new Map();
+        this.dirtyFilledColors = new Set(this.colorOrder);
+        if (this.outputMode === "color") this.brushColor = this.outputColor;
+        for (const [name, value] of Object.entries(this.outputColors)) this.colors[name] = value;
+        for (const sw of this.root.querySelectorAll("[data-output-color]")) {
+            sw.style.background = this.outputColors[sw.dataset.outputColor];
+        }
+        this.outputOpacityInput.value = String(this.outputOpacity);
+        this.outputFillInput.checked = this.autoFillHoles;
+        this.updateOutputControls();
         this.keyboardSink.focus({ preventScroll: true });
     }
 
@@ -432,6 +610,7 @@ class GoohaiMaskEditor {
         // ignores workflow shortcuts originating from text editors.
         this.root.addEventListener("mousedown", (e) => {
             if (e.button !== 0 || e.target === this.keyboardSink) return;
+            if (e.target.closest?.("button, input, textarea, select, option")) return;
             e.preventDefault();
             this.keyboardSink.focus({ preventScroll: true });
         }, true);
@@ -447,13 +626,39 @@ class GoohaiMaskEditor {
             if (act === "clear") this.clear();
             if (act === "cancel") this.close();
             if (act === "save") this.save();
+            const outputMode = e.target.closest("[data-output-mode]")?.dataset.outputMode;
+            if (outputMode) this.switchOutputMode(outputMode);
+            const outputColor = e.target.closest("[data-output-color]")?.dataset.outputColor;
+            if (outputColor) {
+                this.outputColor = outputColor;
+                this.brushColor = outputColor;
+                this.activePaintColor = outputColor;
+                this.updateOutputControls();
+                this.refreshMaskDisplay();
+            }
             this.keyboardSink.focus({ preventScroll: true });
+        });
+        this.outputOpacityInput.addEventListener("input", () => {
+            this.outputOpacity = clamp(Number(this.outputOpacityInput.value), 0, 100);
+            this.updateOutputControls();
+            this.refreshMaskDisplay();
+        });
+        this.outputFillInput.addEventListener("change", () => {
+            this.autoFillHoles = !!this.outputFillInput.checked;
+            this.filledPaintValid = false;
+            this.refreshMaskDisplay();
         });
         this.stage.addEventListener("mousedown", (e) => this.pointerDown(e));
         window.addEventListener("mousemove", this._move = (e) => this.pointerMove(e), true);
         window.addEventListener("mouseup", this._up = (e) => this.pointerUp(e), true);
         this.stage.addEventListener("mouseleave", () => { this.cursor.style.display = "none"; });
         this.stage.addEventListener("contextmenu", (e) => e.preventDefault());
+        this.root.addEventListener("contextmenu", (e) => {
+            const swatch = e.target.closest("[data-output-color]");
+            if (!swatch || this.outputMode !== "color") return;
+            e.preventDefault();
+            this.setColor(swatch.dataset.outputColor);
+        });
         this.stage.addEventListener("wheel", this._wheel = (e) => this.wheel(e), { passive: false });
         // Keyboard shortcuts are routed by installMaskEditorHotkey(). Keeping
         // a second window keydown listener here would apply Ctrl+Z twice.
@@ -474,8 +679,24 @@ class GoohaiMaskEditor {
             this.paint.height = editH;
             this.shapeMask.width = editW;
             this.shapeMask.height = editH;
+            this.rawPaint.width = editW;
+            this.rawPaint.height = editH;
+            this.filledPaint.width = editW;
+            this.filledPaint.height = editH;
             this.buildBaseAlphaPaint(editW, editH);
             await this.loadInitialMask(editW, editH);
+            await this.loadInitialColors(editW, editH);
+            await this.initializeColorLayers(editW, editH);
+            this.colorModePaint = this.cloneCanvas(this.rawPaint);
+            if (this.outputMode === "original") {
+                this.maskModeBasePaint = this.cloneCanvas(this.rawPaint);
+                this.maskModeChangesDirty = false;
+                this.brushColor = this.maskBrushColor;
+                this.activePaintColor = this.maskBrushColor;
+                this.recolorMask();
+            }
+            this.maskModePaint = this.cloneCanvas(this.rawPaint);
+            this.refreshMaskDisplay();
             this.dims.textContent = `${editW} \u00d7 ${editH}${this.natural.sf < 1 ? `  (\u539f\u56fe ${this.natural.w} \u00d7 ${this.natural.h})` : ""}`;
             this.frame.style.display = "inline-block";
             this.loading.style.display = "none";
@@ -520,7 +741,7 @@ class GoohaiMaskEditor {
 
     restoreBaseAlphaPaint() {
         if (!this.baseAlphaPaint) return;
-        const ctx = this.paint.getContext("2d");
+        const ctx = this.rawPaint.getContext("2d");
         ctx.drawImage(this.baseAlphaPaint, 0, 0);
     }
 
@@ -546,7 +767,7 @@ class GoohaiMaskEditor {
                 }
                 if (!hasTransparent) return;
             }
-            const out = this.paint.getContext("2d").createImageData(editW, editH);
+            const out = this.rawPaint.getContext("2d").createImageData(editW, editH);
             const [r, g, b] = this.colorRgb();
             for (let i = 0; i < data.data.length; i += 4) {
                 const a = data.data[i + 3];
@@ -560,7 +781,7 @@ class GoohaiMaskEditor {
                     out.data[i + 3] = 255;
                 }
             }
-            this.paint.getContext("2d").putImageData(out, 0, 0);
+            this.rawPaint.getContext("2d").putImageData(out, 0, 0);
         } catch (_) {
             // Existing mask restore is best-effort; the editor can still open blank.
         }
@@ -572,13 +793,362 @@ class GoohaiMaskEditor {
         }
         this.tool = tool;
         this.updateToolbar();
+        this.filledPaintValid = false;
+        this.refreshMaskDisplay();
     }
 
     setColor(color) {
-        this.brushColor = color;
+        this.maskBrushColor = color;
         this.root.querySelectorAll("[data-color]").forEach((b) => b.classList.toggle("active", b.dataset.color === color));
-        this.recolorMask();
+        if (this.outputMode !== "color") {
+            this.brushColor = color;
+            this.activePaintColor = color;
+            this.recolorMask();
+        }
+        this.refreshMaskDisplay();
         this.updateCursor();
+    }
+
+    async loadInitialColors(editW, editH) {
+        if (!this.colorUrl) return;
+        try {
+            const colorImg = await loadImage(this.colorUrl);
+            const tmp = document.createElement("canvas");
+            tmp.width = editW; tmp.height = editH;
+            const ctx = tmp.getContext("2d");
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(colorImg, 0, 0, editW, editH);
+            const colors = ctx.getImageData(0, 0, editW, editH).data;
+            const mask = this.rawPaint.getContext("2d").getImageData(0, 0, editW, editH);
+            for (let i = 0; i < mask.data.length; i += 4) {
+                // rawPaint contains the restored mask area as opaque pixels;
+                // copy the saved RGB layer into those pixels.
+                if (mask.data[i + 3] > 5) {
+                    mask.data[i] = colors[i];
+                    mask.data[i + 1] = colors[i + 1];
+                    mask.data[i + 2] = colors[i + 2];
+                }
+            }
+            this.rawPaint.getContext("2d").putImageData(mask, 0, 0);
+        } catch (_) {}
+    }
+
+    async initializeColorLayers(editW, editH) {
+        this.colorLayers.clear();
+        for (const name of this.colorOrder) {
+            const canvas = document.createElement("canvas");
+            canvas.width = editW; canvas.height = editH;
+            this.colorLayers.set(name, canvas);
+            const filled = document.createElement("canvas");
+            filled.width = editW; filled.height = editH;
+            this.filledColorLayers.set(name, filled);
+        }
+        let restored = null;
+        try { restored = await readColorLayersChunk(this.colorUrl); } catch (_) {}
+        if (restored && restored.width === editW && restored.height === editH) {
+            for (let ci = 0; ci < this.colorOrder.length; ci++) {
+                const name = this.colorOrder[ci], canvas = this.colorLayers.get(name);
+                const image = canvas.getContext("2d").createImageData(editW, editH);
+                const rgb = this.hexRgb(this.outputColors[name]);
+                for (let index = 0; index < restored.bits.length; index++) if (restored.bits[index] & (1 << ci)) {
+                    const off = index * 4;
+                    image.data[off] = rgb[0]; image.data[off + 1] = rgb[1]; image.data[off + 2] = rgb[2]; image.data[off + 3] = 255;
+                }
+                canvas.getContext("2d").putImageData(image, 0, 0);
+            }
+        } else {
+            const colorName = this.outputColor || "red";
+            const target = this.colorLayers.get(colorName) || this.colorLayers.get("red");
+            const source = this.rawPaint.getContext("2d").getImageData(0, 0, editW, editH);
+            const rgb = this.hexRgb(this.outputColors[colorName] || this.outputColors.red);
+            for (let i = 0; i < source.data.length; i += 4) {
+                if (source.data[i + 3] <= 5) continue;
+                source.data[i] = rgb[0];
+                source.data[i + 1] = rgb[1];
+                source.data[i + 2] = rgb[2];
+            }
+            target.getContext("2d").putImageData(source, 0, 0);
+        }
+        this.composeColorLayers();
+        this.dirtyFilledColors = new Set(this.colorOrder);
+    }
+
+    composeColorLayers() {
+        if (!this.colorLayers?.size || !this.rawPaint.width) return;
+        const ctx = this.rawPaint.getContext("2d");
+        ctx.clearRect(0, 0, this.rawPaint.width, this.rawPaint.height);
+        for (const name of this.colorOrder) ctx.drawImage(this.colorLayers.get(name), 0, 0);
+        this.filledPaintValid = false;
+    }
+
+    syncColorLayersFromRawPaint() {
+        if (!this.colorLayers?.size || !this.rawPaint.width) return;
+        const w = this.rawPaint.width, h = this.rawPaint.height;
+        const source = this.rawPaint.getContext("2d").getImageData(0, 0, w, h).data;
+        const layerImages = new Map();
+        const palette = this.colorOrder.map((name) => ({
+            name,
+            rgb: this.hexRgb(this.outputColors[name]),
+        }));
+        for (const name of this.colorOrder) {
+            const layer = this.colorLayers.get(name);
+            layerImages.set(name, layer.getContext("2d").createImageData(w, h));
+        }
+        for (let offset = 0; offset < source.length; offset += 4) {
+            if (source[offset + 3] <= 5) continue;
+            let best = palette[0], bestDistance = Infinity;
+            for (const entry of palette) {
+                const dr = source[offset] - entry.rgb[0];
+                const dg = source[offset + 1] - entry.rgb[1];
+                const db = source[offset + 2] - entry.rgb[2];
+                const distance = dr * dr + dg * dg + db * db;
+                if (distance < bestDistance) {
+                    best = entry;
+                    bestDistance = distance;
+                }
+            }
+            const target = layerImages.get(best.name).data;
+            target[offset] = best.rgb[0];
+            target[offset + 1] = best.rgb[1];
+            target[offset + 2] = best.rgb[2];
+            target[offset + 3] = source[offset + 3];
+        }
+        for (const [name, image] of layerImages) {
+            this.colorLayers.get(name).getContext("2d").putImageData(image, 0, 0);
+        }
+        this.dirtyFilledColors = new Set(this.colorOrder);
+        this.colorModePaint = this.cloneCanvas(this.rawPaint);
+        this.filledPaintValid = false;
+    }
+
+    invalidateFillAfterHistoryChange() {
+        this.fillRevision++;
+        this.filledPaintValid = false;
+        if (this.outputMode === "color") this.syncColorLayersFromRawPaint();
+        else this.maskModeChangesDirty = true;
+    }
+
+    activeColorLayer() {
+        return this.colorLayers?.get(this.outputColor) || this.colorLayers?.get("red") || this.rawPaint;
+    }
+
+    switchOutputMode(mode) {
+        mode = mode === "color" ? "color" : "original";
+        if (mode === this.outputMode) return;
+        if (mode === "original") {
+            this.composeColorLayers();
+            this.maskModeBasePaint = this.cloneCanvas(this.rawPaint);
+            this.maskModeChangesDirty = false;
+            this.colorModePaint = this.cloneCanvas(this.rawPaint);
+            this.outputMode = mode;
+            this.brushColor = this.maskBrushColor;
+            this.activePaintColor = this.maskBrushColor;
+            this.recolorMask();
+        } else {
+            this.mergeMaskModeChanges();
+            this.outputMode = mode;
+            this.brushColor = this.outputColor || "red";
+            this.activePaintColor = this.brushColor;
+            this.composeColorLayers();
+        }
+        this.filledPaintValid = false;
+        this.updateOutputControls();
+        this.refreshMaskDisplay();
+    }
+
+    cloneCanvas(source) {
+        const target = document.createElement("canvas");
+        target.width = source.width;
+        target.height = source.height;
+        target.getContext("2d").drawImage(source, 0, 0);
+        return target;
+    }
+
+    updateOutputControls() {
+        this.root.querySelectorAll("[data-output-mode]").forEach((button) => {
+            button.classList.toggle("active", button.dataset.outputMode === this.outputMode);
+        });
+        this.root.querySelectorAll("[data-output-color]").forEach((button) => {
+            button.classList.toggle("active", button.dataset.outputColor === this.outputColor);
+        });
+        this.outputOpacityInput.value = String(this.outputOpacity);
+        this.outputOpacityValue.textContent = `${this.outputOpacity}%`;
+        const colorMode = this.outputMode === "color";
+        if (colorMode && this.outputColor) {
+            this.brushColor = this.outputColor;
+            this.activePaintColor = this.outputColor;
+        } else if (!colorMode) {
+            this.brushColor = this.maskBrushColor;
+            this.activePaintColor = this.maskBrushColor;
+        }
+        this.outputColorRow.style.display = colorMode ? "flex" : "none";
+        if (this.outputOpacityRow) this.outputOpacityRow.style.display = colorMode ? "flex" : "none";
+    }
+
+    rebuildFilledPaint() {
+        if (!this.rawPaint.width || this.tool === "marquee") {
+            this.filledPaintValid = false;
+            return;
+        }
+        // Mask-only mode always contains one display color. Reuse the compact
+        // single-layer flood fill instead of repeatedly classifying every
+        // painted pixel against all eight overlay colors.
+        this.rebuildSingleColorFill(this.rawPaint, this.filledPaint, this.colorRgb());
+        this.filledPaintValid = true;
+    }
+
+    rebuildSingleColorFill(layer, target, rgb) {
+        const w = layer.width, h = layer.height;
+        const source = layer.getContext("2d").getImageData(0, 0, w, h);
+        const result = target.getContext("2d").createImageData(w, h);
+        const wall = new Uint8Array(w * h);
+        let minX = w, minY = h, maxX = -1, maxY = -1;
+        for (let index = 0; index < wall.length; index++) {
+            if (source.data[index * 4 + 3] <= 5) continue;
+            wall[index] = 1;
+            const x = index % w, y = (index / w) | 0;
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+        if (maxX < 0) { target.getContext("2d").clearRect(0, 0, w, h); return; }
+        minX = Math.max(0, minX - 1); minY = Math.max(0, minY - 1);
+        maxX = Math.min(w - 1, maxX + 1); maxY = Math.min(h - 1, maxY + 1);
+        const outside = new Uint8Array(w * h);
+        const queue = new Int32Array((maxX - minX + 1) * (maxY - minY + 1));
+        let head = 0, tail = 0;
+        const visit = (x, y) => {
+            if (x < minX || y < minY || x > maxX || y > maxY) return;
+            const index = y * w + x;
+            if (wall[index] || outside[index]) return;
+            outside[index] = 1; queue[tail++] = index;
+        };
+        for (let x = minX; x <= maxX; x++) { visit(x, minY); visit(x, maxY); }
+        for (let y = minY; y <= maxY; y++) { visit(minX, y); visit(maxX, y); }
+        while (head < tail) {
+            const index = queue[head++], x = index % w, y = (index / w) | 0;
+            visit(x - 1, y); visit(x + 1, y); visit(x, y - 1); visit(x, y + 1);
+        }
+        for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+            const index = y * w + x;
+            if (!wall[index] && outside[index]) continue;
+            const off = index * 4;
+            result.data[off] = rgb[0]; result.data[off + 1] = rgb[1]; result.data[off + 2] = rgb[2]; result.data[off + 3] = 255;
+        }
+        target.getContext("2d").putImageData(result, 0, 0);
+    }
+
+    rebuildFilledColorLayers(names = null) {
+        if (!this.colorLayers?.size) { this.rebuildFilledPaint(); return; }
+        const rebuildNames = names || [...this.dirtyFilledColors];
+        for (const name of rebuildNames) {
+            const layer = this.colorLayers.get(name);
+            const filledLayer = this.filledColorLayers.get(name);
+            if (!layer || !filledLayer) continue;
+            this.rebuildSingleColorFill(layer, filledLayer, this.hexRgb(this.outputColors[name]));
+            this.dirtyFilledColors.delete(name);
+        }
+        const output = this.filledPaint.getContext("2d");
+        output.clearRect(0, 0, this.filledPaint.width, this.filledPaint.height);
+        for (const name of this.colorOrder) output.drawImage(this.filledColorLayers.get(name), 0, 0);
+        this.filledPaintValid = true;
+    }
+
+    effectiveMaskImageData() {
+        const source = this.autoFillHoles && this.tool !== "marquee" && this.filledPaintValid
+            ? this.filledPaint
+            : this.rawPaint;
+        const data = source.getContext("2d").getImageData(0, 0, source.width, source.height);
+        if (!this.maskInverted) return data;
+        const [r, g, b] = this.outputMode === "color" ? this.outputColorRgb() : this.colorRgb();
+        for (let i = 0; i < data.data.length; i += 4) {
+            if (data.data[i + 3] > 5) {
+                data.data[i] = 0;
+                data.data[i + 1] = 0;
+                data.data[i + 2] = 0;
+                data.data[i + 3] = 0;
+            } else {
+                data.data[i] = r;
+                data.data[i + 1] = g;
+                data.data[i + 2] = b;
+                data.data[i + 3] = 255;
+            }
+        }
+        return data;
+    }
+
+    saveMaskImageData() {
+        if (this.autoFillHoles && this.tool !== "marquee" && !this.filledPaintValid) {
+            if (this.outputMode === "color") this.rebuildFilledColorLayers();
+            else this.rebuildFilledPaint();
+        }
+        return this.effectiveMaskImageData();
+    }
+
+    outputColorRgb() {
+        const hex = String(this.outputColors?.[this.outputColor] || "#fff").replace("#", "");
+        const value = hex.length === 3 ? hex.split("").map((part) => part + part).join("") : hex;
+        return [0, 1, 2].map((index) => {
+            const channel = parseInt(value.slice(index * 2, index * 2 + 2), 16);
+            return Number.isFinite(channel) ? channel : 255;
+        });
+    }
+
+    refreshMaskDisplay(rebuildFill = true) {
+        if (!this.rawPaint.width) return;
+        if (rebuildFill && this.autoFillHoles && this.tool !== "marquee" && !this.filledPaintValid) {
+            if (this.outputMode === "color") this.rebuildFilledColorLayers();
+            else this.rebuildFilledPaint();
+        }
+        const source = !rebuildFill && this.tool !== "marquee" && this.drawingPreviewPaint
+            ? this.drawingPreviewPaint
+            : rebuildFill && this.autoFillHoles && this.tool !== "marquee" && this.filledPaintValid
+                ? this.filledPaint
+            : this.rawPaint;
+        // rawPaint, filledPaint and the color layers already contain their
+        // final display RGB values. Copy the canvas directly instead of doing
+        // a full getImageData/loop/putImageData pass after every brush stroke.
+        const ctx = this.paint.getContext("2d");
+        ctx.clearRect(0, 0, this.paint.width, this.paint.height);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
+        if (this.maskInverted) {
+            ctx.putImageData(this.effectiveMaskImageData(), 0, 0);
+        } else {
+            ctx.drawImage(source, 0, 0);
+        }
+        this.paint.style.opacity = this.outputMode === "color"
+            ? String(this.outputOpacity / 100)
+            : ".5";
+        this.paint.style.filter = "none";
+    }
+
+    refreshDrawingPreview() {
+        if (this.drawingPreviewRaf) return;
+        this.drawingPreviewRaf = requestAnimationFrame(() => {
+            this.drawingPreviewRaf = 0;
+            if (!this.isDrawing || !this.drawingPreviewPaint) return;
+            const ctx = this.paint.getContext("2d");
+            ctx.clearRect(0, 0, this.paint.width, this.paint.height);
+            ctx.globalAlpha = 1;
+            ctx.globalCompositeOperation = "source-over";
+            if (this.maskInverted) {
+                const data = this.drawingPreviewPaint.getContext("2d").getImageData(0, 0, this.paint.width, this.paint.height);
+                const [r, g, b] = this.outputMode === "color" ? this.outputColorRgb() : this.colorRgb();
+                for (let i = 0; i < data.data.length; i += 4) {
+                    if (data.data[i + 3] > 5) data.data[i + 3] = 0;
+                    else {
+                        data.data[i] = r; data.data[i + 1] = g; data.data[i + 2] = b; data.data[i + 3] = 255;
+                    }
+                }
+                ctx.putImageData(data, 0, 0);
+            } else {
+                ctx.drawImage(this.drawingPreviewPaint, 0, 0);
+            }
+            this.paint.style.opacity = this.outputMode === "color"
+                ? String(this.outputOpacity / 100)
+                : ".5";
+            this.paint.style.filter = "none";
+        });
     }
 
     updateToolbar() {
@@ -594,26 +1164,36 @@ class GoohaiMaskEditor {
     keyDown(e) {
         if (this.isEditable(e.target) && e.target !== this.keyboardSink) return;
         const ctrl = e.ctrlKey || e.metaKey;
-        const key = e.key;
+        const key = String(e.key || "");
+        const code = String(e.code || "");
         const consume = () => {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation?.();
         };
-        if (ctrl && !e.shiftKey && key.toLowerCase() === "z") { consume(); this.undo(); return; }
-        if (ctrl && e.shiftKey && (key.toLowerCase() === "z" || key.toLowerCase() === "y")) { consume(); this.redoAction(); return; }
-        if (ctrl && !e.shiftKey && key.toLowerCase() === "i") { consume(); this.invert(); return; }
-        if (!ctrl && key.toLowerCase() === "b") { consume(); this.setTool("brush"); return; }
-        if (!ctrl && key.toLowerCase() === "e") { consume(); this.setTool("eraser"); return; }
-        if (!ctrl && key.toLowerCase() === "m") { consume(); this.setTool("marquee"); return; }
-        if (!ctrl && key.toLowerCase() === "x") { consume(); this.clear(); return; }
-        if (!ctrl && key === "Enter") { consume(); this.save(); return; }
-        if (!ctrl && key === "Escape") { consume(); this.close(); return; }
-        if (!ctrl && (key === "[" || key === "\u3010")) { consume(); this.setBrushSize(this.brushSize - 5); return; }
-        if (!ctrl && (key === "]" || key === "\u3011")) { consume(); this.setBrushSize(this.brushSize + 5); return; }
-        if (key === " ") { consume(); this.spaceDown = true; this.updateCursor(); }
-        if (key === "Alt") { consume(); this.altDown = true; this.updateCursor(); }
-        if (key === "Shift" && !this.shiftDown) {
+        if (ctrl && !e.shiftKey && (code === "KeyZ" || key.toLowerCase() === "z")) { consume(); this.undo(); return; }
+        if (ctrl && e.shiftKey && (code === "KeyZ" || code === "KeyY" || key.toLowerCase() === "z" || key.toLowerCase() === "y")) { consume(); this.redoAction(); return; }
+        if (ctrl && !e.shiftKey && (code === "KeyI" || key.toLowerCase() === "i")) { consume(); this.invert(); return; }
+        if (!ctrl && code === "KeyB") { consume(); this.setTool("brush"); return; }
+        if (!ctrl && code === "KeyE") { consume(); this.setTool("eraser"); return; }
+        if (!ctrl && code === "KeyM") { consume(); this.setTool("marquee"); return; }
+        if (!ctrl && code === "KeyX") { consume(); this.clear(); return; }
+        if (!ctrl && code === "KeyF") {
+            consume();
+            this.autoFillHoles = !this.autoFillHoles;
+            this.outputFillInput.checked = this.autoFillHoles;
+            this.filledPaintValid = false;
+            this.refreshMaskDisplay();
+            return;
+        }
+        if (!ctrl && (code === "Enter" || code === "NumpadEnter" || key === "Enter")) { consume(); this.save(); return; }
+        if (!ctrl && (code === "Escape" || key === "Escape")) { consume(); this.close(); return; }
+        if (!ctrl && (code === "BracketLeft" || key === "[" || key === "\u3010")) { consume(); this.setBrushSize(this.brushSize - 5); return; }
+        if (!ctrl && (code === "BracketRight" || key === "]" || key === "\u3011")) { consume(); this.setBrushSize(this.brushSize + 5); return; }
+        if (code === "Space" || key === " ") { consume(); this.spaceDown = true; this.updateCursor(); return; }
+        if (code === "AltLeft" || code === "AltRight" || key === "Alt") { consume(); this.altDown = true; this.updateCursor(); return; }
+        if ((code === "ShiftLeft" || code === "ShiftRight" || key === "Shift") && !this.shiftDown) {
+            consume();
             this.shiftDown = true;
             if (this.tool !== "marquee") {
                 this.prevToolBeforeShift = this.tool;
@@ -627,9 +1207,10 @@ class GoohaiMaskEditor {
 
     keyUp(e) {
         if (this.isEditable(e.target) && e.target !== this.keyboardSink) return;
-        if (e.key === " ") { this.spaceDown = false; this.updateCursor(); }
-        if (e.key === "Alt") { this.altDown = false; this.updateCursor(); }
-        if (e.key === "Shift") {
+        const code = String(e.code || "");
+        if (code === "Space" || e.key === " ") { this.spaceDown = false; this.updateCursor(); }
+        if (code === "AltLeft" || code === "AltRight" || e.key === "Alt") { this.altDown = false; this.updateCursor(); }
+        if (code === "ShiftLeft" || code === "ShiftRight" || e.key === "Shift") {
             this.shiftDown = false;
             if (this.shiftTemp) {
                 if (!this.shiftTempDrew && this.prevToolBeforeShift) {
@@ -683,11 +1264,45 @@ class GoohaiMaskEditor {
     }
 
     pointerDown(e) {
+        if (e.target.closest?.(".guhai-mask-output-panel")) {
+            this.cursor.style.display = "none";
+            return;
+        }
         if (!this.paint.width) return;
         this.lastMouse = { x: e.clientX, y: e.clientY };
+        let colorContext = null;
+        if (e.button === 2 && this.outputMode === "color" && this.tool !== "marquee") {
+            const pos = this.canvasPos(e);
+            if (!this.filledPaintValid || this.dirtyFilledColors.size) {
+                this.rebuildFilledColorLayers([...this.dirtyFilledColors]);
+            }
+            let hit = null;
+            for (let i = this.colorOrder.length - 1; i >= 0; i--) {
+                const name = this.colorOrder[i];
+                const layer = this.filledColorLayers.get(name);
+                const pixel = layer.getContext("2d").getImageData(Math.floor(pos.x), Math.floor(pos.y), 1, 1).data;
+                if (pixel[3] > 5) { hit = { name, pixel }; break; }
+            }
+            if (hit) {
+                colorContext = {
+                    x: e.clientX,
+                    y: e.clientY,
+                    rgb: this.hexRgb(this.outputColors[hit.name]),
+                    pos,
+                    sourceName: hit.name,
+                };
+            }
+        }
         if (e.button === 2 && this.tool !== "marquee") {
             e.preventDefault();
-            this.rightResize = { x: e.clientX, size: this.brushSize };
+            this.closeColorContextMenu();
+            this.rightResize = {
+                x: e.clientX,
+                y: e.clientY,
+                size: this.brushSize,
+                moved: false,
+                colorContext,
+            };
             return;
         }
         if (this.spaceDown || e.button === 1) {
@@ -701,20 +1316,58 @@ class GoohaiMaskEditor {
         }
         if (e.button !== 0) return;
         if (this.marqueeRects.length) this.fillMarqueeIntoMask();
+        if (this.tool !== "marquee") {
+            if (!this.filledPaintValid) {
+                if (this.autoFillHoles) {
+                    if (this.outputMode === "color") this.rebuildFilledColorLayers([...this.dirtyFilledColors]);
+                    else this.rebuildFilledPaint();
+                }
+            }
+            this.drawingPreviewPaint = document.createElement("canvas");
+            this.drawingPreviewPaint.width = this.rawPaint.width;
+            this.drawingPreviewPaint.height = this.rawPaint.height;
+            this.drawingPreviewPaint.getContext("2d").drawImage(
+                this.autoFillHoles ? this.filledPaint : this.rawPaint,
+                0,
+                0,
+            );
+        } else {
+            this.drawingPreviewPaint = null;
+        }
         this.isDrawing = true;
+        this.lastDrawClient = { x: e.clientX, y: e.clientY };
+        this.drawingColor = this.outputColor;
+        if (this.outputMode === "color") this.dirtyFilledColors.add(this.drawingColor);
+        this.filledPaintValid = false;
         this.lastPos = this.canvasPos(e);
-        const ctx = this.paint.getContext("2d");
+        const ctx = this.outputMode === "color" ? this.activeColorLayer().getContext("2d") : this.rawPaint.getContext("2d");
         this.applyBrush(ctx);
         ctx.beginPath();
         ctx.arc(this.lastPos.x, this.lastPos.y, this.brushSize / 2, 0, Math.PI * 2);
         ctx.fill();
+        if (this.drawingPreviewPaint) {
+            const previewCtx = this.drawingPreviewPaint.getContext("2d");
+            this.applyBrush(previewCtx);
+            previewCtx.beginPath();
+            previewCtx.arc(this.lastPos.x, this.lastPos.y, this.brushSize / 2, 0, Math.PI * 2);
+            previewCtx.fill();
+        }
+        this.refreshDrawingPreview();
     }
 
     pointerMove(e) {
         this.lastMouse = { x: e.clientX, y: e.clientY };
         if (this.rightResize) {
             e.preventDefault();
-            this.setBrushSize(this.rightResize.size + Math.round((e.clientX - this.rightResize.x) / 2));
+            const dx = e.clientX - this.rightResize.x;
+            const dy = e.clientY - this.rightResize.y;
+            if (!this.rightResize.moved && Math.hypot(dx, dy) >= 5) {
+                this.rightResize.moved = true;
+                this.rightResize.colorContext = null;
+            }
+            if (this.rightResize.moved) {
+                this.setBrushSize(this.rightResize.size + Math.round(dx / 2));
+            }
             return;
         }
         this.updateCursor(e);
@@ -731,19 +1384,37 @@ class GoohaiMaskEditor {
             return;
         }
         if (!this.isDrawing || !this.lastPos) return;
+        if (this.lastDrawClient
+            && Math.hypot(e.clientX - this.lastDrawClient.x, e.clientY - this.lastDrawClient.y) < 2.5) return;
+        this.lastDrawClient = { x: e.clientX, y: e.clientY };
         const pos = this.canvasPos(e);
-        const ctx = this.paint.getContext("2d");
+        const ctx = this.outputMode === "color" ? this.activeColorLayer().getContext("2d") : this.rawPaint.getContext("2d");
+        this.filledPaintValid = false;
         this.applyBrush(ctx);
         ctx.beginPath();
         ctx.moveTo(this.lastPos.x, this.lastPos.y);
         ctx.lineTo(pos.x, pos.y);
         ctx.stroke();
+        if (this.drawingPreviewPaint) {
+            const previewCtx = this.drawingPreviewPaint.getContext("2d");
+            this.applyBrush(previewCtx);
+            previewCtx.beginPath();
+            previewCtx.moveTo(this.lastPos.x, this.lastPos.y);
+            previewCtx.lineTo(pos.x, pos.y);
+            previewCtx.stroke();
+        }
         this.lastPos = pos;
+        this.refreshDrawingPreview();
     }
 
     pointerUp() {
         if (this.rightResize) {
+            const gesture = this.rightResize;
             this.rightResize = null;
+            if (!gesture.moved && gesture.colorContext) {
+                const hit = gesture.colorContext;
+                this.openColorContextMenu(hit.x, hit.y, hit.rgb, hit.pos, hit.sourceName);
+            }
             return;
         }
         if (this.isPanning) {
@@ -756,7 +1427,35 @@ class GoohaiMaskEditor {
         }
         if (this.isDrawing) {
             this.isDrawing = false;
+            this.lastDrawClient = null;
+            if (this.drawingPreviewRaf) {
+                cancelAnimationFrame(this.drawingPreviewRaf);
+                this.drawingPreviewRaf = 0;
+            }
+            this.drawingPreviewPaint = null;
+            if (this.outputMode === "color") this.composeColorLayers();
             this.pushHistory();
+            if (this.outputMode === "color") this.colorModePaint = this.cloneCanvas(this.rawPaint);
+            else this.maskModeChangesDirty = true;
+            if (this.autoFillHoles && this.outputMode === "color") {
+                const color = this.drawingColor;
+                const revision = ++this.fillRevision;
+                setTimeout(() => {
+                    if (revision !== this.fillRevision || !this.autoFillHoles) return;
+                    this.rebuildFilledColorLayers([color]);
+                    this.refreshMaskDisplay(true);
+                }, 0);
+            } else if (this.autoFillHoles) {
+                const revision = ++this.fillRevision;
+                setTimeout(() => {
+                    if (revision !== this.fillRevision || !this.autoFillHoles) return;
+                    this.rebuildFilledPaint();
+                    this.refreshMaskDisplay(true);
+                }, 0);
+            } else {
+                this.refreshMaskDisplay();
+            }
+            this.drawingColor = null;
         }
     }
 
@@ -770,8 +1469,168 @@ class GoohaiMaskEditor {
         ctx.fillStyle = eraser ? "#fff" : this.colors[this.brushColor];
     }
 
+    colorComponent(rgb, forcedSourceName = null, useFilled = false) {
+        const w = this.rawPaint.width, h = this.rawPaint.height;
+        const sourceName = forcedSourceName || this.colorOrder?.find((name) => {
+            const c = this.hexRgb(this.outputColors[name]);
+            return (c[0] - rgb[0]) ** 2 + (c[1] - rgb[1]) ** 2 + (c[2] - rgb[2]) ** 2 <= 55 * 55;
+        });
+        const source = sourceName
+            ? (useFilled ? this.filledColorLayers?.get(sourceName) : this.colorLayers?.get(sourceName))
+            : null;
+        const data = (source || this.rawPaint).getContext("2d").getImageData(0, 0, w, h).data;
+        const same = (index) => {
+            if (data[index * 4 + 3] <= 5) return false;
+            const dr = data[index * 4] - rgb[0], dg = data[index * 4 + 1] - rgb[1], db = data[index * 4 + 2] - rgb[2];
+            return dr * dr + dg * dg + db * db <= 55 * 55;
+        };
+        const components = [];
+        const visited = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            if (!same(i) || visited[i]) continue;
+            const queue = [i], cells = [];
+            visited[i] = 1;
+            for (let head = 0; head < queue.length; head++) {
+                const index = queue[head]; cells.push(index);
+                const x = index % w, y = Math.floor(index / w);
+                for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    const ni = ny * w + nx;
+                    if (!visited[ni] && same(ni)) { visited[ni] = 1; queue.push(ni); }
+                }
+            }
+            components.push(cells);
+        }
+        return components;
+    }
+
+    openColorContextMenu(x, y, rgb, point = null, sourceName = null) {
+        this.closeColorContextMenu();
+        const menu = document.createElement("div");
+        menu.className = "guhai-mask-color-menu";
+        menu.style.left = `${x}px`; menu.style.top = `${y}px`;
+        for (const [name, color] of Object.entries(this.outputColors)) {
+            const button = document.createElement("button");
+            button.title = name; button.style.background = color;
+            button.addEventListener("click", () => { this.modifyColorComponent(rgb, name, point, sourceName); this.closeColorContextMenu(); });
+            menu.appendChild(button);
+        }
+        const del = document.createElement("button");
+        del.textContent = "×"; del.title = "删除连续区域";
+        del.addEventListener("click", () => { this.modifyColorComponent(rgb, null, point, sourceName); this.closeColorContextMenu(); });
+        menu.appendChild(del);
+        document.body.appendChild(menu);
+        this._colorMenu = menu;
+        setTimeout(() => window.addEventListener("mousedown", this._colorMenuOutside = (e) => { if (!menu.contains(e.target)) this.closeColorContextMenu(); }, true), 0);
+    }
+
+    closeColorContextMenu() {
+        this._colorMenu?.remove(); this._colorMenu = null;
+        if (this._colorMenuOutside) window.removeEventListener("mousedown", this._colorMenuOutside, true);
+        this._colorMenuOutside = null;
+    }
+
+    modifyColorComponent(rgb, colorName, point = null, forcedSourceName = null) {
+        const components = this.colorComponent(rgb, forcedSourceName, !!forcedSourceName);
+        const pos = point;
+        let target = components[0];
+        if (pos) {
+            const index = Math.floor(pos.y) * this.rawPaint.width + Math.floor(pos.x);
+            target = components.find((cells) => cells.includes(index)) || target;
+        }
+        if (!target) return;
+        const sourceName = forcedSourceName || this.colorOrder.find((name) => {
+            const c = this.hexRgb(this.outputColors[name]);
+            return (c[0] - rgb[0]) ** 2 + (c[1] - rgb[1]) ** 2 + (c[2] - rgb[2]) ** 2 <= 55 * 55;
+        }) || this.outputColor;
+        const source = this.colorLayers?.get(sourceName);
+        const targetLayer = colorName ? this.colorLayers?.get(colorName) : null;
+        const ctx = source ? source.getContext("2d") : this.rawPaint.getContext("2d");
+        const data = ctx.getImageData(0, 0, this.rawPaint.width, this.rawPaint.height);
+        const targetData = targetLayer && targetLayer !== source
+            ? targetLayer.getContext("2d").getImageData(0, 0, this.rawPaint.width, this.rawPaint.height)
+            : null;
+        const rgb2 = colorName ? this.hexRgb(this.outputColors[colorName]) : [0, 0, 0];
+        for (const index of target) {
+            const off = index * 4;
+            // A filled component also contains its generated interior. Only
+            // move/delete pixels that were actually painted in the source
+            // layer, so disabling auto-fill still restores the real strokes.
+            if (data.data[off + 3] <= 5) continue;
+            if (targetData) {
+                targetData.data[off] = rgb2[0]; targetData.data[off + 1] = rgb2[1]; targetData.data[off + 2] = rgb2[2]; targetData.data[off + 3] = data.data[off + 3];
+            } else if (colorName) {
+                data.data[off] = rgb2[0]; data.data[off + 1] = rgb2[1]; data.data[off + 2] = rgb2[2];
+            }
+            if (!colorName || targetData) { data.data[off] = 0; data.data[off + 1] = 0; data.data[off + 2] = 0; data.data[off + 3] = 0; }
+        }
+        ctx.putImageData(data, 0, 0);
+        if (targetData) targetLayer.getContext("2d").putImageData(targetData, 0, 0);
+        if (this.colorLayers?.size) {
+            this.dirtyFilledColors.add(sourceName);
+            if (colorName) this.dirtyFilledColors.add(colorName);
+        }
+        if (this.colorLayers?.size) this.composeColorLayers();
+        this.filledPaintValid = false; this.pushHistory(); this.refreshMaskDisplay();
+    }
+
+    hexRgb(hex) {
+        const v = String(hex).replace("#", "");
+        return [0, 1, 2].map((i) => parseInt(v.slice(i * 2, i * 2 + 2), 16) || 0);
+    }
+
+    mergeMaskModeChanges() {
+        if (!this.maskModeChangesDirty || !this.maskModeBasePaint || !this.colorLayers?.size) return;
+        const w = this.rawPaint.width, h = this.rawPaint.height;
+        const current = this.rawPaint.getContext("2d").getImageData(0, 0, w, h);
+        const base = this.maskModeBasePaint.getContext("2d").getImageData(0, 0, w, h).data;
+        const selectedName = this.outputColor || "red";
+        const selected = this.hexRgb(this.outputColors[selectedName] || this.outputColors.red);
+        const layerData = new Map();
+        for (const [name, layer] of this.colorLayers) {
+            layerData.set(name, layer.getContext("2d").getImageData(0, 0, w, h));
+        }
+        let changed = false;
+        for (let i = 0; i < current.data.length; i += 4) {
+            const was = base[i + 3] > 5, is = current.data[i + 3] > 5;
+            if (was === is) continue;
+            changed = true;
+            if (!is) {
+                for (const data of layerData.values()) {
+                    data.data[i] = 0;
+                    data.data[i + 1] = 0;
+                    data.data[i + 2] = 0;
+                    data.data[i + 3] = 0;
+                }
+            } else {
+                const data = layerData.get(selectedName)
+                    || [...layerData.values()][this.colorOrder.indexOf("red")]
+                    || [...layerData.values()][0];
+                data.data[i] = selected[0];
+                data.data[i + 1] = selected[1];
+                data.data[i + 2] = selected[2];
+                data.data[i + 3] = current.data[i + 3];
+            }
+        }
+        if (changed) {
+            for (const [name, data] of layerData) {
+                this.colorLayers.get(name).getContext("2d").putImageData(data, 0, 0);
+            }
+            this.dirtyFilledColors = new Set(this.colorOrder);
+            this.filledPaintValid = false;
+        }
+        this.colorModePaint = this.cloneCanvas(this.rawPaint);
+        this.maskModeBasePaint = this.cloneCanvas(this.rawPaint);
+        this.maskModeChangesDirty = false;
+    }
+
     updateCursor(e) {
         if (!this.lastMouse && !e) return;
+        if (e?.target?.closest?.(".guhai-mask-output-panel")) {
+            this.cursor.style.display = "none";
+            this.stage.style.cursor = "";
+            return;
+        }
         const p = e ? { x: e.clientX, y: e.clientY } : this.lastMouse;
         if (!p) return;
         if (this.spaceDown) {
@@ -798,49 +1657,69 @@ class GoohaiMaskEditor {
     }
 
     pushHistory() {
-        const ctx = this.paint.getContext("2d");
-        this.history.push(ctx.getImageData(0, 0, this.paint.width, this.paint.height));
+        const ctx = this.rawPaint.getContext("2d");
+        this.history.push({
+            image: ctx.getImageData(0, 0, this.paint.width, this.paint.height),
+            inverted: this.maskInverted,
+        });
         if (this.history.length > 50) this.history.shift();
         this.redo = [];
     }
 
     undo() {
         if (this.history.length <= 1) return;
-        const ctx = this.paint.getContext("2d");
+        const ctx = this.rawPaint.getContext("2d");
         this.redo.push(this.history.pop());
-        ctx.putImageData(this.history[this.history.length - 1], 0, 0);
+        const snapshot = this.history[this.history.length - 1];
+        ctx.putImageData(snapshot.image, 0, 0);
+        this.maskInverted = !!snapshot.inverted;
+        this.invalidateFillAfterHistoryChange();
         this.clearMarquee();
+        this.refreshMaskDisplay();
     }
 
     redoAction() {
         if (!this.redo.length) return;
         const snap = this.redo.pop();
         this.history.push(snap);
-        this.paint.getContext("2d").putImageData(snap, 0, 0);
+        this.rawPaint.getContext("2d").putImageData(snap.image, 0, 0);
+        this.maskInverted = !!snap.inverted;
+        this.invalidateFillAfterHistoryChange();
         this.clearMarquee();
+        this.refreshMaskDisplay();
     }
 
     clear() {
-        const ctx = this.paint.getContext("2d");
-        ctx.clearRect(0, 0, this.paint.width, this.paint.height);
+        this.fillRevision++;
+        this.isDrawing = false;
+        this.lastDrawClient = null;
+        if (this.drawingPreviewRaf) {
+            cancelAnimationFrame(this.drawingPreviewRaf);
+            this.drawingPreviewRaf = 0;
+        }
+        this.drawingPreviewPaint = null;
+        if (this.outputMode === "color" && this.colorLayers?.size) {
+            for (const layer of this.colorLayers.values()) layer.getContext("2d").clearRect(0, 0, layer.width, layer.height);
+            this.composeColorLayers();
+        } else {
+            this.rawPaint.getContext("2d").clearRect(0, 0, this.paint.width, this.paint.height);
+        }
+        this.filledPaint.getContext("2d").clearRect(0, 0, this.filledPaint.width, this.filledPaint.height);
+        for (const layer of this.filledColorLayers?.values?.() || []) layer.getContext("2d").clearRect(0, 0, layer.width, layer.height);
+        this.dirtyFilledColors = new Set();
+        this.filledPaintValid = false;
+        if (this.outputMode !== "color") this.maskModeChangesDirty = true;
         this.clearMarquee();
         this.pushHistory();
+        this.refreshMaskDisplay();
     }
 
     invert() {
         this.fillMarqueeIntoMask();
-        const ctx = this.paint.getContext("2d");
-        const data = ctx.getImageData(0, 0, this.paint.width, this.paint.height);
-        const [r, g, b] = this.colorRgb();
-        for (let i = 0; i < data.data.length; i += 4) {
-            if (data.data[i + 3] > 0) data.data[i + 3] = 0;
-            else {
-                data.data[i] = r; data.data[i + 1] = g; data.data[i + 2] = b; data.data[i + 3] = 255;
-            }
-        }
-        ctx.putImageData(data, 0, 0);
+        this.maskInverted = !this.maskInverted;
         this.clearMarquee();
         this.pushHistory();
+        this.refreshMaskDisplay();
     }
 
     colorRgb() {
@@ -854,7 +1733,7 @@ class GoohaiMaskEditor {
 
     recolorMask() {
         if (!this.paint.width) return;
-        const ctx = this.paint.getContext("2d");
+        const ctx = this.rawPaint.getContext("2d");
         const data = ctx.getImageData(0, 0, this.paint.width, this.paint.height);
         const [r, g, b] = this.colorRgb();
         let changed = false;
@@ -866,7 +1745,10 @@ class GoohaiMaskEditor {
                 changed = true;
             }
         }
-        if (changed) ctx.putImageData(data, 0, 0);
+        if (changed) {
+            ctx.putImageData(data, 0, 0);
+            this.filledPaintValid = false;
+        }
     }
 
     clearMarquee() {
@@ -1032,7 +1914,7 @@ class GoohaiMaskEditor {
 
     fillMarqueeIntoMask() {
         if (!this.maskBBox()) return;
-        const ctx = this.paint.getContext("2d");
+        const ctx = this.rawPaint.getContext("2d");
         const layer = document.createElement("canvas");
         layer.width = this.paint.width;
         layer.height = this.paint.height;
@@ -1044,8 +1926,10 @@ class GoohaiMaskEditor {
         ctx.globalCompositeOperation = this.altDown || this.tool === "eraser" ? "destination-out" : "source-over";
         ctx.drawImage(layer, 0, 0);
         ctx.globalCompositeOperation = "source-over";
+        if (this.outputMode !== "color") this.maskModeChangesDirty = true;
         this.clearMarquee();
         this.pushHistory();
+        this.refreshMaskDisplay();
     }
 
     startMarqueeAnimation() {
@@ -1158,6 +2042,7 @@ class GoohaiMaskEditor {
     save() {
         try {
             this.fillMarqueeIntoMask();
+            if (this.outputMode !== "color") this.mergeMaskModeChanges();
             const sourceImage = this.sourceImage || this.img;
             const editImage = this.editImageCanvas || this.img;
             const sourceUrl = this.imageUrl;
@@ -1165,9 +2050,20 @@ class GoohaiMaskEditor {
             // This prevents a workflow undo/configure event from changing the
             // canvas or node state while the save task is being prepared.
             const paint = document.createElement("canvas");
-            paint.width = this.paint.width;
-            paint.height = this.paint.height;
-            paint.getContext("2d").drawImage(this.paint, 0, 0);
+            paint.width = this.rawPaint.width;
+            paint.height = this.rawPaint.height;
+            paint.getContext("2d").putImageData(this.saveMaskImageData(), 0, 0);
+            // Keep the hand-painted mask separate from the optional filled
+            // display/save view. The paired painted-masked file must always
+            // contain the raw strokes so the editor can toggle filling again
+            // when it is reopened.
+            const rawMask = document.createElement("canvas");
+            rawMask.width = this.rawPaint.width;
+            rawMask.height = this.rawPaint.height;
+            rawMask.getContext("2d").drawImage(this.rawPaint, 0, 0);
+            const colorChunkTask = this.colorLayers?.size
+                ? colorLayersPngChunk(this.colorLayers, this.colorOrder, this.rawPaint.width, this.rawPaint.height)
+                : Promise.resolve(null);
             const savePaint = document.createElement("canvas");
             savePaint.width = paint.width;
             savePaint.height = paint.height;
@@ -1181,29 +2077,69 @@ class GoohaiMaskEditor {
             }
             const natW = this.natural.w || savePaint.width;
             const natH = this.natural.h || savePaint.height;
-            // Build the green composite immediately, independently of the
-            // uploads. The legacy canvas can display this before the image
-            // widget points at the black alpha-mask file.
+            const loaderTag = this.preserveRgbUnderMask ? "" : "-goohai";
+            const stateTag = `__ghm-${this.outputMode}-${this.outputColor}-${this.outputOpacity}-${this.autoFillHoles ? 1 : 0}-${this.maskInverted ? 1 : 0}${loaderTag}`;
+            const outputCanvas = document.createElement("canvas");
+            outputCanvas.width = natW;
+            outputCanvas.height = natH;
+            const outputCtx = outputCanvas.getContext("2d");
+            outputCtx.drawImage(sourceImage || editImage, 0, 0, natW, natH);
+             if (this.outputMode === "color" && this.outputOpacity > 0) {
+                 const colorLayer = document.createElement("canvas");
+                 colorLayer.width = natW;
+                 colorLayer.height = natH;
+                 const colorCtx = colorLayer.getContext("2d");
+                 colorCtx.imageSmoothingEnabled = false;
+                 colorCtx.drawImage(paint, 0, 0, natW, natH);
+                 const colorData = colorCtx.getImageData(0, 0, natW, natH);
+                 const factor = this.outputOpacity / 100;
+                 for (let i = 3; i < colorData.data.length; i += 4) colorData.data[i] = Math.round(colorData.data[i] * factor);
+                 colorCtx.putImageData(colorData, 0, 0);
+                 outputCtx.drawImage(colorLayer, 0, 0);
+            }
+            const outputData = outputCtx.getImageData(0, 0, natW, natH);
+            const outputMask = document.createElement("canvas");
+            outputMask.width = natW;
+            outputMask.height = natH;
+            const outputMaskCtx = outputMask.getContext("2d");
+            outputMaskCtx.imageSmoothingEnabled = false;
+            outputMaskCtx.drawImage(savePaint, 0, 0, natW, natH);
+            const outputMaskData = outputMaskCtx.getImageData(0, 0, natW, natH).data;
+            // The official loader reads its mask from this PNG's alpha. The
+            // Goohai loader already reads the separate painted-masked file, so
+            // its painted-output can keep the complete RGBA composite without
+            // creating another image file.
+            // Store the effective (possibly hole-filled) mask in the existing
+            // output PNG alpha channel for both loaders. The source image is
+            // restored from the paired original file when it is read, so this
+            // does not require an additional mask file.
+            for (let i = 0; i < outputData.data.length; i += 4) {
+                if (outputMaskData[i + 3] > 5) outputData.data[i + 3] = 0;
+            }
+            const outputBlobTask = rgbaToPngBlob(outputData.data, natW, natH);
+            // The saved image remains the requested output. Only the editor
+            // preview gets the legacy green mask overlay in original mode.
+            if (this.outputMode === "original") {
+                const previewOverlay = outputCtx.createImageData(natW, natH);
+                for (let i = 0; i < outputMaskData.length; i += 4) {
+                    previewOverlay.data[i] = 42;
+                    previewOverlay.data[i + 1] = 210;
+                    previewOverlay.data[i + 2] = 112;
+                    previewOverlay.data[i + 3] = outputMaskData[i + 3] > 5 ? 128 : 0;
+                }
+                const previewLayer = document.createElement("canvas");
+                previewLayer.width = natW;
+                previewLayer.height = natH;
+                previewLayer.getContext("2d").putImageData(previewOverlay, 0, 0);
+                outputCtx.drawImage(previewLayer, 0, 0);
+            }
+            // Build the preview independently of the uploads. The legacy
+            // canvas can display it before the image widget is updated.
             const previewTask = (async () => {
                 await nextFrame();
-                const preview = document.createElement("canvas");
-                preview.width = natW;
-                preview.height = natH;
-                const pctx = preview.getContext("2d");
-                pctx.drawImage(sourceImage || editImage, 0, 0, natW, natH);
-                const green = document.createElement("canvas");
-                green.width = natW;
-                green.height = natH;
-                const gctx = green.getContext("2d");
-                gctx.imageSmoothingEnabled = false;
-                gctx.drawImage(savePaint, 0, 0, natW, natH);
-                gctx.globalCompositeOperation = "source-in";
-                gctx.fillStyle = "#2ad270";
-                gctx.fillRect(0, 0, natW, natH);
-                pctx.globalAlpha = 0.5;
-                pctx.drawImage(green, 0, 0);
-                pctx.globalAlpha = 1;
-                return await canvasToObjectUrl(preview, "image/jpeg", 0.88);
+                // Keep the node preview's original alpha. JPEG would turn
+                // transparent PNG pixels into a black background.
+                return await canvasToObjectUrl(outputCanvas, "image/png");
             })();
             const task = (async () => {
                 await nextFrame();
@@ -1215,15 +2151,19 @@ class GoohaiMaskEditor {
                 const mctx = masked.getContext("2d");
                 mctx.drawImage(sourceImage, 0, 0, natW, natH);
                 let officialMaskedBlob = null;
+                let maskedBlob = null;
+                const colorChunk = await colorChunkTask;
                 if (this.preserveRgbUnderMask) {
                     const maskCanvas = document.createElement("canvas");
                     maskCanvas.width = natW;
                     maskCanvas.height = natH;
                     const maskCtx = maskCanvas.getContext("2d");
                     maskCtx.imageSmoothingEnabled = false;
-                    maskCtx.drawImage(savePaint, 0, 0, natW, natH);
+                    maskCtx.drawImage(rawMask, 0, 0, natW, natH);
                     const imageData = mctx.getImageData(0, 0, natW, natH);
                     const maskData = maskCtx.getImageData(0, 0, natW, natH).data;
+                    const rawData = rawMask.getContext("2d").getImageData(0, 0, rawMask.width, rawMask.height).data;
+                    const sx = rawMask.width / natW, sy = rawMask.height / natH;
                     for (let i = 0; i < imageData.data.length; i += 4) {
                         const originalAlpha = imageData.data[i + 3];
                         if (originalAlpha < 250) {
@@ -1231,14 +2171,42 @@ class GoohaiMaskEditor {
                             imageData.data[i + 1] = 255;
                             imageData.data[i + 2] = 255;
                         }
-                        if (maskData[i + 3] > 5) imageData.data[i + 3] = 1;
+                        if (maskData[i + 3] > 5) {
+                            imageData.data[i + 3] = 1;
+                            const x = (i / 4) % natW, y = Math.floor((i / 4) / natW);
+                            const ri = (Math.min(rawMask.height - 1, Math.floor(y * sy)) * rawMask.width + Math.min(rawMask.width - 1, Math.floor(x * sx))) * 4;
+                            imageData.data[i] = rawData[ri];
+                            imageData.data[i + 1] = rawData[ri + 1];
+                            imageData.data[i + 2] = rawData[ri + 2];
+                        }
                     }
-                    officialMaskedBlob = await rgbaToPngBlob(imageData.data, natW, natH);
+                    officialMaskedBlob = await rgbaToPngBlob(imageData.data, natW, natH, colorChunk ? [colorChunk] : []);
                 } else {
                     mctx.globalCompositeOperation = "destination-out";
                     mctx.imageSmoothingEnabled = false;
-                    mctx.drawImage(savePaint, 0, 0, natW, natH);
+                    mctx.drawImage(rawMask, 0, 0, natW, natH);
                     mctx.globalCompositeOperation = "source-over";
+                    // Preserve the per-pixel paint colors under the transparent
+                    // mask pixels. The alpha remains the mask, while RGB is
+                    // used to restore color layers when reopening the editor.
+                    const maskedData = mctx.getImageData(0, 0, natW, natH);
+                    const rawData = rawMask.getContext("2d").getImageData(0, 0, rawMask.width, rawMask.height).data;
+                    const sx = rawMask.width / natW, sy = rawMask.height / natH;
+                    for (let y = 0; y < natH; y++) for (let x = 0; x < natW; x++) {
+                        const oi = (y * natW + x) * 4;
+                        const ri = (Math.min(rawMask.height - 1, Math.floor(y * sy)) * rawMask.width + Math.min(rawMask.width - 1, Math.floor(x * sx))) * 4;
+                        if (rawData[ri + 3] > 5) {
+                            maskedData.data[oi] = rawData[ri];
+                            maskedData.data[oi + 1] = rawData[ri + 1];
+                            maskedData.data[oi + 2] = rawData[ri + 2];
+                            // Keep a non-zero alpha so browser PNG decoding
+                            // preserves the RGB color for editor reopening.
+                            // The loader still treats this as a masked pixel.
+                            maskedData.data[oi + 3] = 1;
+                        }
+                    }
+                    mctx.putImageData(maskedData, 0, 0);
+                    maskedBlob = await rgbaToPngBlob(maskedData.data, natW, natH, colorChunk ? [colorChunk] : []);
                 }
 
                 const uploads = [
@@ -1251,13 +2219,24 @@ class GoohaiMaskEditor {
                     }),
                     officialMaskedBlob
                         ? uploadBlob(officialMaskedBlob, `clipspace-painted-masked-${ts}.png`, "clipspace")
-                        : uploadCanvas(masked, `clipspace-painted-masked-${ts}.png`),
+                        : uploadBlob(maskedBlob, `clipspace-painted-masked-${ts}.png`, "clipspace"),
+                    uploadBlob(await outputBlobTask, `clipspace-painted-output-${ts}${stateTag}.png`, "clipspace"),
                 ];
-                const [, uploadedMasked] = await Promise.all(uploads);
+                const [, uploadedMasked, uploadedOutput] = await Promise.all(uploads);
 
-                const uploadedName = uploadedMasked.name || uploadedMasked.filename || `clipspace-painted-masked-${ts}.png`;
+                const uploadedName = uploadedOutput.name || uploadedOutput.filename || `clipspace-painted-output-${ts}${stateTag}.png`;
                 const uploadedPath = `${uploadedMasked.subfolder ? `${uploadedMasked.subfolder}/` : ""}${uploadedName} [input]`;
-                return { value: uploadedPath, previewTask };
+                return {
+                    value: uploadedPath,
+                    previewTask,
+                    outputState: {
+                        mode: this.outputMode,
+                        color: this.outputColor,
+                        opacity: this.outputOpacity,
+                        fill: this.autoFillHoles,
+                        inverted: this.maskInverted,
+                    },
+                };
             })();
             this.onSave(task, previewTask);
             this.close();
@@ -1268,6 +2247,7 @@ class GoohaiMaskEditor {
 
     close() {
         if (this.raf) cancelAnimationFrame(this.raf);
+        if (this.drawingPreviewRaf) cancelAnimationFrame(this.drawingPreviewRaf);
         if (window._guhaiActiveMaskEditor === this) window._guhaiActiveMaskEditor = null;
         window.removeEventListener("mousemove", this._move, true);
         window.removeEventListener("mouseup", this._up, true);
@@ -1393,7 +2373,10 @@ function installLoadImagePersistence(node) {
 function nodeHasMask(node) {
     const imageWidget = findImageWidget(node);
     const value = String(imageWidget?.value || "");
-    return !!node?._guhaiMaskSaving || value.includes("painted-masked") || value.includes("clipspace-mask-");
+    return !!node?._guhaiMaskSaving
+        || value.includes("painted-masked")
+        || value.includes("painted-output-")
+        || value.includes("clipspace-mask-");
 }
 
 function findTransparentWidget(node) {
@@ -1551,13 +2534,68 @@ function getNodeScreenPoint(node, x, y) {
     };
 }
 
-function ensureNodeToolbar(node) {
-    removeNodeToolbar(node);
-    return null;
+function ensureNodeToolbar(node, nodeRoot = null) {
+    if (!isLoadImageGoohaiNode(node)) return null;
+    const root = nodeRoot || node._guhaiDomToolbar?.closest?.("[data-node-id]");
+    if (!root?.isConnected) return null;
+    let toolbar = root.querySelector?.(".guhai-nodes2-load-toolbar");
+    if (!toolbar) {
+        toolbar = document.createElement("div");
+        toolbar.className = "guhai-nodes2-load-toolbar";
+        toolbar.innerHTML = `
+            <button type="button" data-action="upload" title="上传图像">上传</button>
+            <button type="button" data-action="transparent" title="保留透明通道" aria-label="RGBA"></button>
+            <button type="button" data-action="mask" title="遮罩编辑">遮罩</button>
+        `;
+        toolbar.addEventListener("pointerdown", (event) => {
+            event.stopPropagation();
+        });
+        toolbar.addEventListener("click", (event) => {
+            const button = event.target?.closest?.("button[data-action]");
+            if (!button) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const action = button.dataset.action;
+            if (action === "upload") {
+                openUploadForNode(node);
+            } else if (action === "transparent") {
+                const transparentWidget = findTransparentWidget(node);
+                if (transparentWidget) {
+                    transparentWidget.value = !transparentWidget.value;
+                    transparentWidget.callback?.(transparentWidget.value);
+                    persistLoadImageState(node);
+                    node.setDirtyCanvas(true, true);
+                    app.graph?.change?.();
+                }
+            } else if (action === "mask") {
+                openEditorForNode(node);
+            }
+            updateNodeToolbar(node);
+        });
+    }
+    // Keep the controls outside node-widgets. Nodes 2.0 lays that container
+    // out as regular content, so inserting the toolbar there both narrows the
+    // button row and pushes the image selector/preview down.
+    if (toolbar.parentElement !== root) root.appendChild(toolbar);
+    toolbar.style.setProperty("--guhai-node-button-bg", getNodeButtonFill(node));
+    node._guhaiDomToolbar = toolbar;
+    updateNodeToolbar(node);
+    return toolbar;
 }
 
 function updateNodeToolbar(node) {
-    removeNodeToolbar(node);
+    const toolbar = node?._guhaiDomToolbar;
+    if (!toolbar?.isConnected) return;
+    const transparentOn = !!findTransparentWidget(node)?.value;
+    const transparent = toolbar.querySelector('[data-action="transparent"]');
+    if (transparent) {
+        // Nodes 2.0's localization layer can translate the RGBA text node into
+        // the boolean widget label (for example "Alpha图像"). Keep the button
+        // text-free and render the fixed label through CSS instead.
+        if (transparent.textContent) transparent.textContent = "";
+        transparent.classList.toggle("active", transparentOn);
+    }
+    toolbar.querySelector('[data-action="mask"]')?.classList.toggle("active", nodeHasMask(node));
 }
 
 function removeNodeToolbar(node) {
@@ -1587,6 +2625,171 @@ function waitForPreviewImage(img) {
     });
 }
 
+function alignNodes2ImageWidget(nodeRoot) {
+    const widgetRoot = nodeRoot.querySelector?.('[data-testid="node-widgets"]');
+    if (!widgetRoot) return;
+    const label = [...widgetRoot.querySelectorAll("label, span, div")].find((element) =>
+        element.childElementCount === 0 && String(element.textContent || "").trim() === "画布图像"
+    );
+    if (!label) return;
+    let row = label.parentElement;
+    while (row && row !== widgetRoot && !row.querySelector("button, input, select, [role='combobox']")) {
+        row = row.parentElement;
+    }
+    if (!row || row === widgetRoot) return;
+    const control = row.querySelector("button, input, select, [role='combobox']");
+    if (!control) return;
+    let controlGroup = control;
+    while (controlGroup.parentElement && controlGroup.parentElement !== row) controlGroup = controlGroup.parentElement;
+    row.dataset.guhaiImageWidgetRow = "true";
+    label.dataset.guhaiImageWidgetLabel = "true";
+    controlGroup.dataset.guhaiImageWidgetControl = "true";
+}
+
+function refreshNodes2LoadImageToolbars(root = document) {
+    const roots = root.matches?.("[data-node-id]")
+        ? [root]
+        : [...(root.querySelectorAll?.("[data-node-id]") || [])];
+    for (const nodeRoot of roots) {
+        const nodeId = nodeRoot.dataset?.nodeId;
+        const node = nodeId != null
+            ? (app.graph?.getNodeById?.(nodeId) || app.graph?.getNodeById?.(Number(nodeId)))
+            : null;
+        const existing = nodeRoot.querySelector?.(".guhai-nodes2-load-toolbar");
+        if (isLoadImageGoohaiNode(node)) {
+            ensureNodeToolbar(node, nodeRoot);
+            alignNodes2ImageWidget(nodeRoot);
+        }
+        else existing?.remove();
+    }
+}
+
+function filledColorLayer(bits, bit, width, height) {
+    const total = width * height;
+    const layer = new Uint8Array(total);
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let index = 0; index < total; index++) {
+        if (!(bits[index] & bit)) continue;
+        layer[index] = 1;
+        const x = index % width, y = (index / width) | 0;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+    }
+    if (maxX < 0) return layer;
+
+    minX = Math.max(0, minX - 1);
+    minY = Math.max(0, minY - 1);
+    maxX = Math.min(width - 1, maxX + 1);
+    maxY = Math.min(height - 1, maxY + 1);
+    const outside = new Uint8Array(total);
+    const queue = new Int32Array((maxX - minX + 1) * (maxY - minY + 1));
+    let head = 0, tail = 0;
+    const visit = (x, y) => {
+        if (x < minX || y < minY || x > maxX || y > maxY) return;
+        const index = y * width + x;
+        if (layer[index] || outside[index]) return;
+        outside[index] = 1;
+        queue[tail++] = index;
+    };
+    for (let x = minX; x <= maxX; x++) {
+        visit(x, minY);
+        visit(x, maxY);
+    }
+    for (let y = minY; y <= maxY; y++) {
+        visit(minX, y);
+        visit(maxX, y);
+    }
+    while (head < tail) {
+        const index = queue[head++], x = index % width, y = (index / width) | 0;
+        visit(x - 1, y);
+        visit(x + 1, y);
+        visit(x, y - 1);
+        visit(x, y + 1);
+    }
+    for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+        const index = y * width + x;
+        if (!outside[index]) layer[index] = 1;
+    }
+    return layer;
+}
+
+function colorOutputPreviewUrl(sources, outputState) {
+    if (!sources?.imageUrl || !sources?.colorUrl || outputState?.mode !== "color") return Promise.resolve(null);
+    const key = [
+        cacheKeyForUrl(sources.imageUrl),
+        cacheKeyForUrl(sources.colorUrl),
+        clamp(Number(outputState.opacity ?? 50), 0, 100),
+        outputState.fill ? 1 : 0,
+        outputState.inverted ? 1 : 0,
+    ].join("|");
+    if (colorPreviewCache.has(key)) return colorPreviewCache.get(key);
+
+    const promise = Promise.all([
+        loadImage(sources.imageUrl),
+        readColorLayersChunk(sources.colorUrl),
+    ]).then(async ([original, savedLayers]) => {
+        if (!savedLayers) return null;
+        const colors = [
+            [255, 255, 255], [255, 48, 48], [255, 140, 32], [255, 229, 46],
+            [40, 214, 111], [36, 217, 209], [52, 124, 255], [176, 76, 255],
+        ];
+        const layerCanvas = document.createElement("canvas");
+        layerCanvas.width = savedLayers.width;
+        layerCanvas.height = savedLayers.height;
+        const layerCtx = layerCanvas.getContext("2d");
+        const layerImage = layerCtx.createImageData(savedLayers.width, savedLayers.height);
+        const alpha = Math.round(255 * clamp(Number(outputState.opacity ?? 50), 0, 100) / 100);
+        for (let colorIndex = 0; colorIndex < colors.length; colorIndex++) {
+            const bit = 1 << colorIndex;
+            const pixels = outputState.fill
+                ? filledColorLayer(savedLayers.bits, bit, savedLayers.width, savedLayers.height)
+                : null;
+            const rgb = colors[colorIndex];
+            for (let index = 0; index < savedLayers.bits.length; index++) {
+                if (pixels ? !pixels[index] : !(savedLayers.bits[index] & bit)) continue;
+                const offset = index * 4;
+                layerImage.data[offset] = rgb[0];
+                layerImage.data[offset + 1] = rgb[1];
+                layerImage.data[offset + 2] = rgb[2];
+                layerImage.data[offset + 3] = alpha;
+            }
+        }
+        if (outputState.inverted) {
+            const colorNames = ["white", "red", "orange", "yellow", "green", "cyan", "blue", "purple"];
+            const fallback = colors[Math.max(0, colorNames.indexOf(outputState.color))] || colors[1];
+            const source = new Uint8ClampedArray(layerImage.data);
+            for (let index = 0; index < savedLayers.bits.length; index++) {
+                const offset = index * 4;
+                if (source[offset + 3] > 5) {
+                    layerImage.data[offset] = 0;
+                    layerImage.data[offset + 1] = 0;
+                    layerImage.data[offset + 2] = 0;
+                    layerImage.data[offset + 3] = 0;
+                } else {
+                    layerImage.data[offset] = fallback[0];
+                    layerImage.data[offset + 1] = fallback[1];
+                    layerImage.data[offset + 2] = fallback[2];
+                    layerImage.data[offset + 3] = alpha;
+                }
+            }
+        }
+        layerCtx.putImageData(layerImage, 0, 0);
+
+        const canvas = document.createElement("canvas");
+        canvas.width = original.naturalWidth || original.width;
+        canvas.height = original.naturalHeight || original.height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(original, 0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(layerCanvas, 0, 0, canvas.width, canvas.height);
+        return await canvasToObjectUrl(canvas, "image/png");
+    }).catch(() => null);
+    colorPreviewCache.set(key, promise);
+    return promise;
+}
+
 function refreshNodes2MaskPreviews(root = document) {
     const images = root.querySelectorAll?.('img[data-testid="main-image"]') || [];
     for (const img of images) {
@@ -1604,17 +2807,18 @@ function refreshNodes2MaskPreviews(root = document) {
         const widgetRoot = img.closest?.("[data-node-id]")?.querySelector?.('[data-testid="node-widgets"]');
         const renderedMaskedValue = [...(widgetRoot?.querySelectorAll?.("button, span") || [])]
             .map((element) => String(element.textContent || "").trim())
-            .find((value) => value.includes("painted-masked") || value.includes("clipspace-mask-")) || "";
+            .find((value) => value.includes("painted-masked") || value.includes("painted-output-") || value.includes("clipspace-mask-")) || "";
         const widgetValue = String(findImageWidget(node)?.value || renderedMaskedValue);
         const src = img.currentSrc || img.src || "";
-        const maskedValue = widgetValue.includes("painted-masked") || widgetValue.includes("clipspace-mask-")
+        const maskedValue = widgetValue.includes("painted-masked") || widgetValue.includes("painted-output-") || widgetValue.includes("clipspace-mask-")
             ? widgetValue
-            : (src.includes("painted-masked") || src.includes("clipspace-mask-") ? src : "");
+            : (src.includes("painted-masked") || src.includes("painted-output-") || src.includes("clipspace-mask-") ? src : "");
 
         if (!maskedValue) {
             parent.querySelector(':scope > img[data-guhai-nodes2-original="true"]')?.remove();
             parent.querySelector(':scope > img[data-guhai-nodes2-green="true"]')?.remove();
             parent.querySelector(':scope > img[data-guhai-nodes2-masked="true"]')?.remove();
+            parent.querySelector(':scope > img[data-guhai-nodes2-color="true"]')?.remove();
             img.style.removeProperty("z-index");
             img._guhaiNodes2MaskKey = null;
             continue;
@@ -1622,8 +2826,9 @@ function refreshNodes2MaskPreviews(root = document) {
 
         let maskedUrl;
         let originalUrl;
+        let sources = null;
         if (maskedValue === widgetValue) {
-            const sources = getEditorSources(maskedValue);
+            sources = getEditorSources(maskedValue);
             maskedUrl = imageUrlFromParts(parseImageValue(maskedValue));
             originalUrl = sources.imageUrl;
         } else {
@@ -1632,9 +2837,49 @@ function refreshNodes2MaskPreviews(root = document) {
             const maskedName = parsedUrl.searchParams.get("filename") || "";
             parsedUrl.searchParams.set("filename", maskedName
                 .replace("painted-masked", "painted")
+                .replace("painted-output-", "painted-")
                 .replace("clipspace-mask-", "clipspace-painted-"));
             originalUrl = parsedUrl.toString();
         }
+
+        const outputState = outputStateFromFilename(parseImageValue(widgetValue).filename)
+            || node?.properties?.guhaiMaskOutputState
+            || sources?.outputState;
+        if (outputState?.mode === "color" && sources?.colorUrl) {
+            const key = `color|${cacheKeyForUrl(sources.imageUrl)}|${cacheKeyForUrl(sources.colorUrl)}|${outputState.opacity}|${outputState.fill ? 1 : 0}|${outputState.inverted ? 1 : 0}`;
+            if (img._guhaiNodes2MaskKey === key
+                && parent.querySelector(':scope > img[data-guhai-nodes2-color="true"]')) continue;
+            img._guhaiNodes2MaskKey = key;
+            parent.querySelector(':scope > img[data-guhai-nodes2-original="true"]')?.remove();
+            parent.querySelector(':scope > img[data-guhai-nodes2-green="true"]')?.remove();
+            parent.querySelector(':scope > img[data-guhai-nodes2-masked="true"]')?.remove();
+            let color = parent.querySelector(':scope > img[data-guhai-nodes2-color="true"]');
+            if (!color) {
+                color = document.createElement("img");
+                color.dataset.guhaiNodes2Color = "true";
+                color.alt = "遮罩颜色叠加预览";
+                color.draggable = false;
+                color.className = img.className;
+                color.style.zIndex = "2";
+                parent.insertBefore(color, img);
+            }
+            color.style.visibility = "hidden";
+            colorOutputPreviewUrl(sources, outputState).then((url) => {
+                if (!url || img._guhaiNodes2MaskKey !== key || !img.isConnected) return;
+                color.src = url;
+                return waitForPreviewImage(color).then(() => {
+                    if (img._guhaiNodes2MaskKey !== key || !img.isConnected) return;
+                    color.style.removeProperty("visibility");
+                    img.style.zIndex = "-1";
+                });
+            }).catch(() => {
+                if (img._guhaiNodes2MaskKey !== key) return;
+                img._guhaiNodes2MaskKey = null;
+                img.style.removeProperty("z-index");
+            });
+            continue;
+        }
+        parent.querySelector(':scope > img[data-guhai-nodes2-color="true"]')?.remove();
 
         const key = `${cacheKeyForUrl(maskedUrl)}|${cacheKeyForUrl(originalUrl)}`;
         if (img._guhaiNodes2MaskKey === key
@@ -1713,6 +2958,7 @@ function installNodes2MaskPreviewObserver() {
         scheduled = true;
         requestAnimationFrame(() => {
             scheduled = false;
+            refreshNodes2LoadImageToolbars();
             refreshNodes2MaskPreviews();
         });
     };
@@ -1837,10 +3083,13 @@ function isXKeyEvent(e) {
 function originalValueFromMaskValue(value) {
     const parsed = parseImageValue(value);
     const isPaintedMasked = parsed.filename.includes("painted-masked");
+    const isPaintedOutput = parsed.filename.includes("painted-output-");
     const isOfficialClipMask = parsed.filename.startsWith("clipspace-mask-");
-    if (!isPaintedMasked && !isOfficialClipMask) return null;
+    if (!isPaintedMasked && !isPaintedOutput && !isOfficialClipMask) return null;
     const filename = isOfficialClipMask
         ? parsed.filename.replace("clipspace-mask-", "clipspace-painted-")
+        : isPaintedOutput
+            ? parsed.filename.split("__ghm-", 1)[0].replace("painted-output-", "painted-") + ".png"
         : parsed.filename.replace("painted-masked", "painted");
     return `${parsed.subfolder ? `${parsed.subfolder}/` : ""}${filename} [${parsed.type || "input"}]`;
 }
@@ -1870,9 +3119,10 @@ function installMaskEditorHotkey() {
         const activeEditor = window._guhaiActiveMaskEditor;
         if (activeEditor) {
             const key = String(e.key || "").toLowerCase();
+            const code = String(e.code || "");
             const ctrl = e.ctrlKey || e.metaKey;
-            const isUndo = ctrl && !e.shiftKey && (key === "z" || e.keyCode === 90);
-            const isRedo = ctrl && e.shiftKey && (key === "z" || key === "y" || e.keyCode === 90 || e.keyCode === 89);
+            const isUndo = ctrl && !e.shiftKey && (code === "KeyZ" || key === "z" || e.keyCode === 90);
+            const isRedo = ctrl && e.shiftKey && (code === "KeyZ" || code === "KeyY" || key === "z" || key === "y" || e.keyCode === 90 || e.keyCode === 89);
             if (isUndo || isRedo) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -2186,17 +3436,21 @@ function openEditorForNode(node) {
         return;
     }
     const sources = getEditorSources(imageWidget.value);
+    const parsedValue = parseImageValue(imageWidget.value);
+    const savedOutputState = node.properties?.guhaiMaskOutputState || null;
     const nodeId = node.id;
     const currentNode = () => app.graph?.getNodeById?.(nodeId) || node;
     // Mark the node before constructing the editor. A workflow undo/configure
     // event must not restore the old painted-masked value while editing.
     node._guhaiMaskEditorActive = true;
     let editor;
-    editor = new GoohaiMaskEditor({
-        imageUrl: sources.imageUrl,
-        maskUrl: sources.maskUrl,
+        editor = new GoohaiMaskEditor({
+            imageUrl: sources.imageUrl,
+            maskUrl: sources.maskUrl,
+            colorUrl: sources.colorUrl,
         maskMode: sources.maskMode,
         preserveRgbUnderMask: isOfficialLoadImageNode(node),
+        outputState: sources.outputState || savedOutputState || null,
         onSave(saveTask, immediatePreviewTask) {
             let targetNode = currentNode();
             targetNode._guhaiMaskEditorSavePending = true;
@@ -2213,10 +3467,12 @@ function openEditorForNode(node) {
                     })
                     .catch(() => {});
             }
-            const pending = Promise.resolve(saveTask).then(({ value, previewDataUrl, previewTask }) => {
+            const pending = Promise.resolve(saveTask).then(({ value, previewDataUrl, previewTask, outputState }) => {
                 targetNode = currentNode();
                 const targetWidget = findImageWidget(targetNode);
                 if (!targetWidget) throw new Error("加载图像节点已不存在");
+                targetNode.properties ||= {};
+                if (outputState) targetNode.properties.guhaiMaskOutputState = outputState;
                 targetWidget.value = value;
                 persistLoadImageState(targetNode);
                 if (targetWidget.options?.values && !targetWidget.options.values.includes(value)) {
@@ -2263,11 +3519,21 @@ function openEditorForNode(node) {
 async function refreshClipspacePreview(node) {
     const imageWidget = findImageWidget(node);
     const value = String(imageWidget?.value || "");
-    if (!value || (!value.includes("painted-masked") && !value.includes("clipspace-mask-"))) return;
+    if (!value || (!value.includes("painted-masked") && !value.includes("painted-output-") && !value.includes("clipspace-mask-"))) return;
     try {
         const sources = getEditorSources(imageWidget.value);
+        const outputState = sources.outputState || node.properties?.guhaiMaskOutputState;
+        if (outputState?.mode === "color") {
+            const colorPreview = await colorOutputPreviewUrl(sources, outputState);
+            if (colorPreview) setNodePreview(node, colorPreview);
+            return;
+        }
         const img = await loadImage(sources.imageUrl);
-        const mask = await loadImage(sources.maskUrl);
+        const parsedValue = parseImageValue(imageWidget.value);
+        const effectiveMaskUrl = parsedValue.filename.includes("painted-output-")
+            ? imageUrlFromParts(parsedValue)
+            : sources.maskUrl;
+        const mask = await loadImage(effectiveMaskUrl);
         const canvas = document.createElement("canvas");
         canvas.width = img.naturalWidth || img.width;
         canvas.height = img.naturalHeight || img.height;
@@ -2366,3 +3632,4 @@ app.registerExtension({
         };
     },
 });
+

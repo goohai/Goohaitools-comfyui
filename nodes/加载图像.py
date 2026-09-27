@@ -59,7 +59,12 @@ class LoadImageGoohai:
     def _find_by_pixel_match(cls, image_str):
         clean = str(image_str).split("[")[0].strip()
         base_name = os.path.basename(clean)
-        painted_name = base_name.replace("painted-masked", "painted")
+        if "painted-output-" in base_name:
+            painted_name = base_name.split("__ghm-", 1)[0].replace(
+                "painted-output-", "painted-"
+            ) + ".png"
+        else:
+            painted_name = base_name.replace("painted-masked", "painted")
         clipspace_dir = os.path.join(folder_paths.get_input_directory(), "clipspace")
         painted_path = os.path.join(clipspace_dir, painted_name)
 
@@ -151,21 +156,41 @@ class LoadImageGoohai:
         if not os.path.isfile(image_path):
             return (None, None, "")
         is_clipspace = "[input]" in str(image)
+        base_name = os.path.basename(str(image).split("[")[0].strip())
+        is_output = "painted-output-" in base_name
 
         clipspace_mask_img = None
+        clipspace_source_img = None
         try:
             if is_clipspace:
                 clipspace_dir = os.path.dirname(image_path)
-                base_name = os.path.basename(image_path)
-                original_name = base_name.replace("painted-masked", "painted")
-                original_path = os.path.join(clipspace_dir, original_name)
-
-                if os.path.exists(original_path):
-                    img = node_helpers.pillow(Image.open, original_path)
-                    clipspace_mask_img = node_helpers.pillow(Image.open, image_path)
-                    clipspace_mask_img = self._fix_orientation(clipspace_mask_img)
-                else:
+                stored_name = os.path.basename(image_path)
+                if is_output:
+                    stem = stored_name.rsplit(".", 1)[0].split("__ghm-", 1)[0]
+                    original_name = stem.replace("painted-output-", "painted-") + ".png"
+                    mask_name = stem.replace("painted-output-", "painted-masked-") + ".png"
+                    original_path = os.path.join(clipspace_dir, original_name)
+                    mask_path = os.path.join(clipspace_dir, mask_name)
                     img = node_helpers.pillow(Image.open, image_path)
+                    if os.path.exists(original_path):
+                        clipspace_source_img = node_helpers.pillow(
+                            Image.open, original_path
+                        )
+                        clipspace_source_img = self._fix_orientation(
+                            clipspace_source_img
+                        )
+                    if os.path.exists(mask_path):
+                        clipspace_mask_img = node_helpers.pillow(Image.open, mask_path)
+                        clipspace_mask_img = self._fix_orientation(clipspace_mask_img)
+                else:
+                    original_name = stored_name.replace("painted-masked", "painted")
+                    original_path = os.path.join(clipspace_dir, original_name)
+                    if os.path.exists(original_path):
+                        img = node_helpers.pillow(Image.open, original_path)
+                        clipspace_mask_img = node_helpers.pillow(Image.open, image_path)
+                        clipspace_mask_img = self._fix_orientation(clipspace_mask_img)
+                    else:
+                        img = node_helpers.pillow(Image.open, image_path)
             else:
                 img = node_helpers.pillow(Image.open, image_path)
         except Exception:
@@ -183,11 +208,19 @@ class LoadImageGoohai:
             filename = os.path.splitext(os.path.basename(image))[0]
 
         clipspace_mask = None
-        if clipspace_mask_img is not None and "A" in clipspace_mask_img.getbands():
-            mask_np = (
-                np.array(clipspace_mask_img.getchannel("A")).astype(np.float32)
-                / 255.0
-            )
+        mask_source_img = clipspace_mask_img
+        if is_output and "A" in img.getbands():
+            # The output PNG now carries the effective (filled) mask in its
+            # alpha channel. Keep the older paired mask for transparent source
+            # images, where the source alpha must not be mistaken for a mask.
+            source_is_transparent = False
+            if clipspace_source_img is not None and "A" in clipspace_source_img.getbands():
+                source_is_transparent = clipspace_source_img.getchannel("A").getextrema()[0] < 255
+            if not source_is_transparent:
+                mask_source_img = img
+        if mask_source_img is not None and "A" in mask_source_img.getbands():
+            alpha_np = np.array(mask_source_img.getchannel("A"), dtype=np.uint8)
+            mask_np = alpha_np.astype(np.float32) / 255.0
             clipspace_mask = torch.from_numpy(1.0 - mask_np)
 
         output_images = []
@@ -195,7 +228,7 @@ class LoadImageGoohai:
         w, h = None, None
         excluded_formats = ["MPO"]
 
-        for frame_img in ImageSequence.Iterator(img):
+        for frame_index, frame_img in enumerate(ImageSequence.Iterator(img)):
             frame_img = self._fix_orientation(
                 node_helpers.pillow(ImageOps.exif_transpose, frame_img)
             )
@@ -203,7 +236,45 @@ class LoadImageGoohai:
                 frame_img = frame_img.point(lambda p: p * (1 / 255))
 
             has_alpha = "A" in frame_img.getbands()
-            if 保留透明通道 and has_alpha:
+            source_alpha = None
+            if is_output and clipspace_source_img is not None:
+                try:
+                    source_frame_img = clipspace_source_img.copy()
+                    try:
+                        source_frame_img.seek(frame_index)
+                    except Exception:
+                        source_frame_img.seek(0)
+                    source_frame_img = self._fix_orientation(source_frame_img)
+                    if source_frame_img.size != frame_img.size:
+                        resampling = getattr(Image, "Resampling", Image).LANCZOS
+                        source_frame_img = source_frame_img.resize(
+                            frame_img.size, resampling
+                        )
+                    if "A" in source_frame_img.getbands():
+                        source_alpha = source_frame_img.getchannel("A")
+                    else:
+                        source_alpha = Image.new("L", source_frame_img.size, 255)
+                except Exception:
+                    source_alpha = None
+
+            preserve_clipspace_rgb = is_clipspace and has_alpha and (
+                "painted-masked" in base_name
+                or "painted-output-" in base_name
+                or "clipspace-mask-" in base_name
+            )
+            # Output PNGs use alpha for the effective mask. Restore the image
+            # alpha from the paired original so the mask metadata does not make
+            # the node's image output transparent.
+            if is_output and source_alpha is not None:
+                rgba_frame = frame_img.convert("RGBA")
+                rgba_frame.putalpha(source_alpha)
+                if 保留透明通道:
+                    frame = rgba_frame
+                else:
+                    frame = self._composite_on_white(rgba_frame)
+            elif preserve_clipspace_rgb:
+                frame = frame_img.convert("RGB")
+            elif 保留透明通道 and has_alpha:
                 frame = frame_img.convert("RGBA")
             elif has_alpha:
                 frame = self._composite_on_white(frame_img.convert("RGBA"))
