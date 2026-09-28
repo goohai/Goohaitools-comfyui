@@ -126,19 +126,18 @@ def scan_models(models_dir: str | os.PathLike[str]) -> tuple[GGUFModel, ...]:
     root_key = tuple(os.path.normcase(os.path.realpath(str(p))) for p in roots)
     with _CACHE_LOCK:
         cached = _SCAN_CACHE.get(root_key)
-    # Model directory contents can change while ComfyUI is running. A small
-    # directory signature keeps dropdown refreshes cheap without going stale.
+    # The node stores the selected model display value in the workflow. Once a
+    # model list has been built for this process, reuse it instead of walking
+    # every model directory again during prompt validation and node execution.
+    # A ComfyUI restart is the explicit refresh point for newly added models.
+    if cached is not None:
+        return cached
+
     files: list[tuple[Path, Path]] = []
-    signature_parts: list[str] = list(root_key)
     for root in roots:
         for path in sorted(root.rglob("*"), key=lambda p: str(p).casefold()):
             if path.is_file() and path.suffix.casefold() == ".gguf":
                 files.append((root, path))
-                stat = path.stat()
-                signature_parts.append(f"{path}|{stat.st_size}|{stat.st_mtime_ns}")
-    signature = tuple(signature_parts)
-    if cached is not None and getattr(scan_models, "_signature", None) == (root_key, signature):
-        return cached
 
     entries: list[GGUFModel] = []
     duplicate_keys: dict[str, int] = {}
@@ -173,8 +172,14 @@ def scan_models(models_dir: str | os.PathLike[str]) -> tuple[GGUFModel, ...]:
     result = tuple(entries)
     with _CACHE_LOCK:
         _SCAN_CACHE[root_key] = result
-    scan_models._signature = (root_key, signature)
     return result
+
+
+def clear_model_scan_cache() -> None:
+    """Clear the one-time model list, for explicit application-level refreshes."""
+    with _CACHE_LOCK:
+        _SCAN_CACHE.clear()
+        _METADATA_CACHE.clear()
 
 
 def select_models(models_dir: str | os.PathLike[str], *, mmproj: bool) -> tuple[GGUFModel, ...]:

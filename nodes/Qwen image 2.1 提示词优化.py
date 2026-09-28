@@ -100,11 +100,6 @@ class QwenImagePromptOptimizer:
         images = collect_images(kwargs)
         has_images = bool(images)
         reverse_mode = has_images and not str(用户提示词 or "").strip()
-        first_image_only = (
-            reverse_mode
-            and len(images) == 1
-            and any(kwargs.get(name) is not None for name in ("图像_01", "image_01"))
-        )
         if reverse_mode:
             model_display = 文生图模型
             base_system = REVERSE_SYSTEM_PROMPT
@@ -143,7 +138,6 @@ class QwenImagePromptOptimizer:
             seed=seed,
             unload_mode=卸载模型,
             reverse_mode=reverse_mode,
-            reverse_resize_2048=first_image_only,
             output_language=输出语言,
             original_user_prompt=str(用户提示词 or ""),
             transparent_background=bool(透明背景),

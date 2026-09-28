@@ -650,6 +650,18 @@ class QwenImageRuntime:
             except Exception:
                 pass
 
+    @staticmethod
+    def _release_cuda_cache() -> None:
+        """Release allocator cache before loading the GGUF vision model."""
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                ipc_collect = getattr(torch.cuda, "ipc_collect", None)
+                if callable(ipc_collect):
+                    ipc_collect()
+        except Exception:
+            pass
+
     @classmethod
     def _close_locked(cls) -> None:
         llm = cls._llm
@@ -720,8 +732,7 @@ class QwenImageRuntime:
         model_path: str,
         mmproj_path: str | None,
     ) -> None:
-        if unload_mode not in {UNLOAD_AUTO, UNLOAD_BEFORE_AFTER}:
-            return
+        cls._release_cuda_cache()
         requested_signature = (
             os.path.abspath(model_path),
             os.path.abspath(mmproj_path) if mmproj_path else "",
@@ -731,8 +742,15 @@ class QwenImageRuntime:
             return
         free, _ = cls._memory_snapshot()
         required = cls._estimated_model_memory(model_path, mmproj_path)
-        if unload_mode == UNLOAD_BEFORE_AFTER or (required > 0 and free < required):
+        # Even with “保持加载”, clear other ComfyUI models when the requested
+        # Qwen model cannot fit. Otherwise llama.cpp may leave layers on CPU.
+        should_release_models = unload_mode == UNLOAD_BEFORE_AFTER
+        should_release_models = should_release_models or (
+            required > 0 and free > 0 and free < required
+        )
+        if should_release_models:
             cls._unload_other_comfy_models()
+            cls._release_cuda_cache()
 
     @classmethod
     def _ensure(
@@ -744,6 +762,16 @@ class QwenImageRuntime:
     ):
         if Llama is None:
             raise RuntimeError(f"llama-cpp-python 不可用：{_LLAMA_IMPORT_ERROR}")
+        supports_gpu = False
+        if llama_cpp is not None:
+            checker = getattr(llama_cpp, "llama_supports_gpu_offload", None)
+            if callable(checker):
+                try:
+                    supports_gpu = bool(checker())
+                except Exception:
+                    supports_gpu = False
+        if not supports_gpu:
+            print("[Goohai Qwen] 当前 llama.cpp 未检测到 GPU offload，n_gpu_layers=-1 仍会退回 CPU。")
         signature = (
             os.path.abspath(model_path),
             os.path.abspath(mmproj_path) if mmproj_path else "",
@@ -781,6 +809,9 @@ class QwenImageRuntime:
                 cls._llm = Llama(
                     model_path=model_path,
                     chat_handler=handler,
+                    # -1 requests all possible layers on the GPU. This only
+                    # works when the installed llama.cpp has a CUDA/ROCm
+                    # backend; the check above makes CPU fallback visible.
                     n_gpu_layers=-1,
                     n_ctx=int(context_size),
                     n_batch=2048,
@@ -807,7 +838,6 @@ class QwenImageRuntime:
         unload: bool = False,
         unload_mode: str | None = None,
         reverse_mode: bool = False,
-        reverse_resize_2048: bool = False,
         output_language: str = "自动",
         original_user_prompt: str = "",
         transparent_background: bool = False,
@@ -822,9 +852,12 @@ class QwenImageRuntime:
             if image_count == 0:
                 context_size = 8192
                 image_max_size = 0
+            elif image_count == 1 and reverse_mode:
+                context_size = 16384
+                image_max_size = 1536
             elif image_count == 1:
                 context_size = 8192
-                image_max_size = 2048 if reverse_resize_2048 else 768
+                image_max_size = 768
             elif image_count <= 4:
                 context_size = 16384
                 image_max_size = 512
@@ -861,7 +894,7 @@ class QwenImageRuntime:
                     "top_p": 0.9,
                     "top_k": 30,
                     "min_p": 0.05,
-                    "max_tokens": 3072 if reverse_mode else DEFAULT_MAX_OUTPUT_TOKENS,
+                    "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
                     "reasoning_budget": 0,
                 }
                 result = _chat_completion_with_interrupt(llm, completion_kwargs)
@@ -876,7 +909,7 @@ class QwenImageRuntime:
                         "type": "json_object",
                         "schema": _schema(editing_mode),
                     }
-                    completion_kwargs["max_tokens"] = 3072 if reverse_mode else DEFAULT_MAX_OUTPUT_TOKENS
+                    completion_kwargs["max_tokens"] = DEFAULT_MAX_OUTPUT_TOKENS
                     retry = _chat_completion_with_interrupt(llm, completion_kwargs)
                     _raise_if_processing_interrupted()
                     text = retry["choices"][0]["message"]["content"]

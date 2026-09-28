@@ -38,10 +38,6 @@ class 图像缩放V2_孤海:
         if 图像 is not None:
             batch_size = 图像.shape[0]
             原高度, 原宽度 = 图像.shape[1], 图像.shape[2]
-            if 遮罩 is not None and tuple(遮罩.shape[-2:]) != (原高度, 原宽度):
-                raise ValueError(
-                    f"遮罩尺寸({遮罩.shape[-1]}x{遮罩.shape[-2]})与图像尺寸({原宽度}x{原高度})不匹配"
-                )
         elif 遮罩 is not None:
             if 遮罩.ndim < 3:
                 raise ValueError("未连接图像时，遮罩必须包含批次、高度和宽度")
