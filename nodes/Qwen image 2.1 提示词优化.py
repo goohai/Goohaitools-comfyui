@@ -9,7 +9,32 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from resources.qwen_image_model_scan import select_models
+
+def _ensure_llm_folder_registry() -> None:
+    """Match llama-cpp's LLM registry, while remaining usable without that node."""
+    registry = getattr(folder_paths, "folder_names_and_paths", {})
+    if "LLM" not in registry:
+        roots = [
+            str(Path(folder_paths.models_dir) / "LLM"),
+            str(Path(folder_paths.models_dir) / "llm"),
+        ]
+        folder_paths.folder_names_and_paths["LLM"] = (roots, {".gguf"})
+    else:
+        roots, extensions = registry["LLM"]
+        roots = list(roots)
+        extensions = set(extensions)
+        for root in (
+            str(Path(folder_paths.models_dir) / "LLM"),
+            str(Path(folder_paths.models_dir) / "llm"),
+        ):
+            if root not in roots:
+                roots.append(root)
+        extensions.add(".gguf")
+        folder_paths.folder_names_and_paths["LLM"] = (roots, extensions)
+
+
+_ensure_llm_folder_registry()
+
 from resources.qwen_image_runtime import (
     I2I_SYSTEM_PROMPT,
     REVERSE_SYSTEM_PROMPT,
@@ -29,8 +54,12 @@ def _models_dir() -> str:
     return str(Path(folder_paths.models_dir))
 
 
-def _choices(mmproj: bool) -> list[str]:
-    return [item.display for item in select_models(_models_dir(), mmproj=mmproj)]
+def _all_choices() -> tuple[list[str], list[str]]:
+    all_llms = folder_paths.get_filename_list("LLM")
+    return (
+        [name for name in all_llms if "mmproj" not in name.casefold()],
+        [name for name in all_llms if "mmproj" in name.casefold()],
+    )
 
 
 def _preferred(choices: list[str], marker: str) -> str:
@@ -39,19 +68,21 @@ def _preferred(choices: list[str], marker: str) -> str:
 
 
 def _resolve(display: str, mmproj: bool) -> str:
-    for item in select_models(_models_dir(), mmproj=mmproj):
-        if item.display == display:
-            return item.path
-    raise ValueError(f"找不到所选模型：{display}")
+    path = folder_paths.get_full_path("LLM", display)
+    if path is None:
+        raise ValueError(f"找不到所选模型：{display}")
+    is_mmproj = "mmproj" in Path(display).name.casefold()
+    if is_mmproj != bool(mmproj):
+        raise ValueError(f"模型类型不匹配：{display}")
+    return path
 
 
 class QwenImagePromptOptimizer:
     @classmethod
     def INPUT_TYPES(cls):
-        t2i = _choices(False)
-        mmproj = _choices(True)
+        t2i, mmproj = _all_choices()
         if not t2i:
-            t2i = ["未找到 qwen35 GGUF 模型"]
+            t2i = ["未找到 GGUF 模型"]
         if not mmproj:
             mmproj = ["未找到 mmproj GGUF 模型"]
         return {
