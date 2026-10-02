@@ -17,6 +17,7 @@ class AnyType(str):
 
 
 ANY = AnyType("*")
+MASK_VISIBLE_THRESHOLD = 0.02
 
 
 class GoohaiAnyExists:
@@ -45,12 +46,19 @@ class GoohaiAnyExists:
         except Exception:
             return False
 
+    @staticmethod
+    def _clean_mask_tensor(value):
+        """Remove near-black mask noise that is not visually distinguishable."""
+        if not torch.is_tensor(value) or value.numel() == 0:
+            return value
+        return torch.where(value > MASK_VISIBLE_THRESHOLD, value, torch.zeros_like(value))
+
     @classmethod
     def _is_empty(cls, value, input_type):
         if value is None or (ExecutionBlocker and isinstance(value, ExecutionBlocker)):
             return True
         if input_type == "MASK":
-            # 纯黑 MASK 视为空，但仍透传原始遮罩。
+            # 纯黑或仅含不可见低值残差的 MASK 视为空。
             return cls._is_black_tensor(value)
         if input_type == "LATENT" and isinstance(value, dict) and "samples" in value:
             return cls._is_black_tensor(value.get("samples"))
@@ -121,10 +129,15 @@ class GoohaiAnyExists:
                         }.get(key, key)
                     break
         input_type = self._runtime_type(Any, gh_input_type)
+        if input_type == "MASK":
+            # Qwen Image 2.1 RGBA outputs can reload as masks containing tiny
+            # alpha residuals (for example 1/255 to 3/255). Remove values that
+            # still look black in a mask preview before testing or forwarding.
+            Any = self._clean_mask_tensor(Any)
         empty = self._is_empty(Any, input_type)
         if not empty:
             return (Any, True)
-        # MASK 的纯黑输入保留原对象；None 则生成 64x64 黑遮罩。
+        # 空 MASK 保留清理后的原尺寸对象；None 则生成 64x64 黑遮罩。
         if input_type == "MASK" and Any is not None:
             return (Any, False)
         if Any is None and input_type == "ANY":

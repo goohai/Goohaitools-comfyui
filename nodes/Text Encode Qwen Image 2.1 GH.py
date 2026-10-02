@@ -1,5 +1,7 @@
 import math
 
+import cv2
+import numpy as np
 import torch
 
 import comfy.model_management
@@ -12,8 +14,16 @@ ROUND_TO = 32
 MAX_RESOLUTION = 4096
 MAX_SINGLE_SIDE_CROP = 64
 MAX_REFERENCE_AREA = 2048 * 2048
+MASK_VISIBLE_THRESHOLD = 0.02
+MASK_MIN_AREA_RATIO = 0.002
+MASK_EXPAND_PIXELS = 30
+MASK_FEATHER_PIXELS = 10
 REFERENCE_SIZE_OPTIONS = ["自动", "768", "1024", "1344", "1536", "2048"]
 RESTORE_INFO_TYPE = "QWEN_IMAGE_21_GH_RESTORE_INFO"
+
+
+def _round_latent_size(value):
+    return max(ROUND_TO, ((int(value) + ROUND_TO // 2) // ROUND_TO) * ROUND_TO)
 
 
 def _valid_image(image):
@@ -108,15 +118,21 @@ def _valid_mask(mask):
     return isinstance(mask, torch.Tensor) and mask.ndim >= 2 and mask.numel() > 0 and mask.shape[-2] > 0 and mask.shape[-1] > 0
 
 
+def _clear_mask_residual(mask):
+    """Keep visually meaningful mask values and remove near-black alpha noise."""
+    return torch.where(mask > MASK_VISIBLE_THRESHOLD, mask, torch.zeros_like(mask))
+
+
 def _prepare_mask(mask, source_width, source_height):
     if mask.ndim == 2:
         mask = mask.unsqueeze(0)
     mask = mask[:1].reshape((1, 1, mask.shape[-2], mask.shape[-1]))
-    mask = mask.clamp(0.0, 1.0)
-    if torch.count_nonzero(mask) == 0:
+    mask = _clear_mask_residual(mask.clamp(0.0, 1.0))
+    nonzero_ratio = torch.count_nonzero(mask).item() / mask.numel()
+    if nonzero_ratio <= MASK_MIN_AREA_RATIO:
         # Both ComfyUI's empty 64x64 placeholder and a true all-black mask
-        # mean that no local mask was supplied. Let the caller use the normal
-        # full-image path instead of allocating or propagating a mask.
+        # or a mask whose visible area is no more than 0.2% of its canvas mean
+        # that no local mask was supplied. Use the full-image path instead.
         return None
     if mask.shape[-2:] != (source_height, source_width):
         mask = comfy.utils.common_upscale(mask, source_width, source_height, "bilinear", "disabled")
@@ -138,6 +154,32 @@ def _resize_mask_contain(mask, width, height, info):
     top = info["content_top"]
     canvas[:, :, top:top + content_height, left:left + content_width] = resized
     return canvas
+
+
+def _expand_and_feather_mask(mask):
+    """Expand and feather a mask after it has reached the latent canvas size."""
+    original_device = mask.device
+    original_dtype = mask.dtype
+    masks = mask.detach().reshape((-1, mask.shape[-2], mask.shape[-1])).to(
+        device="cpu", dtype=torch.float32
+    ).numpy()
+
+    expand_size = MASK_EXPAND_PIXELS * 2 + 1
+    expand_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (expand_size, expand_size))
+    feather_size = MASK_FEATHER_PIXELS * 2 + 1
+    processed = []
+    for item in masks:
+        item = cv2.dilate(item, expand_kernel, iterations=1)
+        item = cv2.GaussianBlur(
+            item,
+            (feather_size, feather_size),
+            sigmaX=MASK_FEATHER_PIXELS,
+            sigmaY=MASK_FEATHER_PIXELS,
+        )
+        processed.append(np.clip(item, 0.0, 1.0))
+
+    output = torch.from_numpy(np.stack(processed, axis=0)).reshape(mask.shape)
+    return output.to(device=original_device, dtype=original_dtype)
 
 
 def _cover_crop_is_small(source_width, source_height, target_width, target_height):
@@ -181,8 +223,8 @@ class TextEncodeQwenImage21GH:
     DESCRIPTION = "Qwen Image 2.1 conditioning with stable reference slots and aspect-safe reference sizing."
 
     def encode(self, clip, prompt, negative_prompt, mode, latent_width, latent_height, vae=None, mask=None, ref_image_size="自动", **kwargs):
-        if latent_width < ROUND_TO or latent_height < ROUND_TO or latent_width % ROUND_TO != 0 or latent_height % ROUND_TO != 0:
-            raise ValueError("Text Encode Qwen Image 2.1 GH：latent 宽和高必须不小于 32，且为 32 的倍数。")
+        latent_width = _round_latent_size(latent_width)
+        latent_height = _round_latent_size(latent_height)
 
         images = {
             index: kwargs.get(f"image_{index:02d}")
@@ -251,6 +293,7 @@ class TextEncodeQwenImage21GH:
                     else:
                         mask_crop = "center" if index == 1 else "disabled"
                         prepared_mask = _resize_mask(source_mask, width, height, mask_crop)
+                    prepared_mask = _expand_and_feather_mask(prepared_mask)
 
             images_vl.append(_prepare_vision_image(prepared))
             if vae is not None:

@@ -210,14 +210,10 @@ class LoadImageGoohai:
         clipspace_mask = None
         mask_source_img = clipspace_mask_img
         if is_output and "A" in img.getbands():
-            # The output PNG now carries the effective (filled) mask in its
-            # alpha channel. Keep the older paired mask for transparent source
-            # images, where the source alpha must not be mistaken for a mask.
-            source_is_transparent = False
-            if clipspace_source_img is not None and "A" in clipspace_source_img.getbands():
-                source_is_transparent = clipspace_source_img.getchannel("A").getextrema()[0] < 255
-            if not source_is_transparent:
-                mask_source_img = img
+            # The editor stores the final effective mask, including optional
+            # hole filling, directly in the output PNG alpha channel. Read it
+            # exactly like ComfyUI's official Load Image node.
+            mask_source_img = img
         if mask_source_img is not None and "A" in mask_source_img.getbands():
             alpha_np = np.array(mask_source_img.getchannel("A"), dtype=np.uint8)
             mask_np = alpha_np.astype(np.float32) / 255.0
