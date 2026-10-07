@@ -1,4 +1,5 @@
 import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
 
 const MAX_IMAGES = 10;
 const NODE_NAME = "QwenImagePromptOptimizer";
@@ -7,6 +8,8 @@ const MIN_PROMPT_HEIGHT = 64;
 const SEED_WIDGET_NAMES = new Set(["种子值", "seed"]);
 const SEED_MODE_WIDGET_NAMES = new Set(["种子模式", "seed_mode"]);
 const LAST_SEED_MODE_PROPERTY = "goohai_last_executed_seed_mode";
+const LLAMA_STATUS_ROUTE = "/goohai/qwen_image_prompt_optimizer/llama_status";
+const LLAMA_INSTALL_ROUTE = "/goohai/qwen_image_prompt_optimizer/install_llama";
 const imageName = (index) => `图像_${String(index + 1).padStart(2, "0")}`;
 const isImageInput = (slot) => {
     const name = String(slot?.name || "");
@@ -30,6 +33,78 @@ function updateSeedWidget(node, seed) {
 
 function widgetValue(node, names) {
     return node.widgets?.find((item) => names.has(item.name))?.value;
+}
+
+function dependencyMessage(message, success = false) {
+    const text = String(message || "未知错误");
+    const escaped = text
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;")
+        .replaceAll("\n", "<br>");
+    const content = success
+        ? `<div style="display:flex;align-items:flex-start;gap:12px;color:#48c774;line-height:1.7;">`
+            + `<span style="display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;border-radius:50%;background:#48c774;color:#fff;font-size:20px;font-weight:700;line-height:1;">✓</span>`
+            + `<div>${escaped}</div></div>`
+        : escaped;
+    if (app.ui?.dialog?.show) app.ui.dialog.show(content);
+    else window.alert(text);
+}
+
+async function installLlamaDependencyButton(node) {
+    if (node._goohaiLlamaDependencyChecked) return;
+    node._goohaiLlamaDependencyChecked = true;
+    let status;
+    try {
+        const response = await api.fetchApi(LLAMA_STATUS_ROUTE, { cache: "no-store" });
+        if (!response.ok) return;
+        status = await response.json();
+    } catch {
+        return;
+    }
+    if (!status?.needs_install || node._goohaiLlamaInstallWidget) return;
+    const canInstall = status.supported === true;
+    const label = "llama-cpp需0.3.48以上，点击自动安装";
+    const widget = node.addWidget("button", label, null, async () => {
+        if (!canInstall) {
+            dependencyMessage(`${status.reason}\n请从以下地址手动安装：\n${status.release_url}`);
+            window.open(status.release_url, "_blank", "noopener,noreferrer");
+            return;
+        }
+        const confirmed = window.confirm(
+            `${status.installed_version ? `当前 llama-cpp-python 版本：${status.installed_version}` : "当前未安装 llama-cpp-python"}`
+            + `\n\n将使用当前 ComfyUI 的 Python 自动安装匹配 ${status.backend} 的最新官方 wheel。安装后必须完全重启 ComfyUI。`
+            + "此安装需从github下载轮子，请确保网络能正常访问github才能安装成功。是否继续？",
+        );
+        if (!confirmed) return;
+        widget.name = "正在安装 llama-cpp...";
+        widget.label = widget.name;
+        node.setDirtyCanvas?.(true, true);
+        try {
+            const response = await api.fetchApi(LLAMA_INSTALL_ROUTE, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ confirm: true }),
+            });
+            const result = await response.json();
+            if (!response.ok || !result?.success) throw new Error(result?.message || `HTTP ${response.status}`);
+            widget.name = "安装完成，请重启 ComfyUI";
+            widget.label = widget.name;
+            widget.callback = () => dependencyMessage(result.message, true);
+            dependencyMessage(`${result.message}\n\n已安装：${result.wheel}`, true);
+        } catch (error) {
+            widget.name = "安装失败，点击重试";
+            widget.label = widget.name;
+            dependencyMessage(`llama-cpp-python 安装失败：\n${error?.message || error}\n\n可前往发布页手动安装：\n${status.release_url}`);
+        }
+        node.setDirtyCanvas?.(true, true);
+    });
+    widget.serialize = false;
+    widget.options = { ...(widget.options || {}), serialize: false };
+    node._goohaiLlamaInstallWidget = widget;
+    requestAnimationFrame(() => applyPromptLayout(node, true));
 }
 
 function nextRandomSeed() {
@@ -207,6 +282,7 @@ app.registerExtension({
         const originalCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             originalCreated?.apply(this, arguments);
+            installLlamaDependencyButton(this);
             this._qwenImageSyncQueued = false;
             this._qwenImageScheduleSync = () => {
                 if (this._qwenImageSyncQueued) return;

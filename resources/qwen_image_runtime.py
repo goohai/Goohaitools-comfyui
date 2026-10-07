@@ -40,9 +40,26 @@ else:
     _LLAMA_IMPORT_ERROR = None
 
 
+def _install_llama_log_filters() -> None:
+    """Hide only the repeated Qwen-VL image-token advisory messages."""
+    try:
+        from llama_cpp._logger import add_log_filters
+    except Exception:
+        return
+    add_log_filters([
+        "Qwen-VL models require at minimum 1024 image tokens to function correctly on grounding tasks",
+        "if you encounter problems with accuracy, try adding --image-min-tokens 1024",
+        "more info: https://github.com/ggml-org/llama.cpp/issues/16842",
+    ])
+
+
+_install_llama_log_filters()
+
+
 TRANSPARENT_PREFIX = "This is an RGBA image with transparency. "
 TRANSPARENT_SUFFIX = " The image has alpha channel and the background is transparent."
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
+_MMPROJ_VRAM_HEADROOM = 1.25
 UNLOAD_AUTO = "自动"
 UNLOAD_KEEP = "保持加载"
 UNLOAD_AFTER = "运行后自动卸载"
@@ -725,6 +742,28 @@ class QwenImageRuntime:
                     continue
         return int(total * 1.25)
 
+    @staticmethod
+    def _mtmd_use_gpu(model_path: str, mmproj_path: str | None) -> bool:
+        """Use GPU vision encoding only when the complete model set fits safely."""
+        if llama_cpp is None or not mmproj_path:
+            return False
+        try:
+            if not torch.cuda.is_available():
+                return False
+            free, _total = torch.cuda.mem_get_info()
+        except Exception:
+            return False
+        required = 0
+        for path in (model_path, mmproj_path):
+            if path:
+                try:
+                    required += os.path.getsize(path)
+                except OSError:
+                    continue
+        if required <= 0:
+            return False
+        return int(free) > int(required * _MMPROJ_VRAM_HEADROOM)
+
     @classmethod
     def _prepare_unload_mode(
         cls,
@@ -762,16 +801,6 @@ class QwenImageRuntime:
     ):
         if Llama is None:
             raise RuntimeError(f"llama-cpp-python 不可用：{_LLAMA_IMPORT_ERROR}")
-        supports_gpu = False
-        if llama_cpp is not None:
-            checker = getattr(llama_cpp, "llama_supports_gpu_offload", None)
-            if callable(checker):
-                try:
-                    supports_gpu = bool(checker())
-                except Exception:
-                    supports_gpu = False
-        if not supports_gpu:
-            print("[Goohai Qwen] 当前 llama.cpp 未检测到 GPU offload，n_gpu_layers=-1 仍会退回 CPU。")
         signature = (
             os.path.abspath(model_path),
             os.path.abspath(mmproj_path) if mmproj_path else "",
@@ -789,11 +818,13 @@ class QwenImageRuntime:
             ):
                 return cls._llm
             cls._close_locked()
+            mtmd_use_gpu = cls._mtmd_use_gpu(model_path, mmproj_path)
             if mmproj_path:
                 if Qwen35ChatHandler is None:
                     raise RuntimeError("当前 llama-cpp-python 没有 Qwen35ChatHandler。")
                 handler = Qwen35ChatHandler(
                     mmproj_path=mmproj_path,
+                    use_gpu=mtmd_use_gpu,
                     add_vision_id=image_mode,
                     enable_thinking=False,
                     verbose=False,
@@ -810,8 +841,8 @@ class QwenImageRuntime:
                     model_path=model_path,
                     chat_handler=handler,
                     # -1 requests all possible layers on the GPU. This only
-                    # works when the installed llama.cpp has a CUDA/ROCm
-                    # backend; the check above makes CPU fallback visible.
+                    # works when the installed llama.cpp has a GPU backend.
+                    # The mtmd vision encoder is decided separately above.
                     n_gpu_layers=-1,
                     n_ctx=int(context_size),
                     n_batch=2048,
