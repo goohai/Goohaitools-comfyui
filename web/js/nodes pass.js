@@ -214,9 +214,9 @@ function buildIgnoreGroupsUI(node) {
     }
 
     function updateDynamicStyles() {
-        if (Math.abs(_lastAppliedScale - uiScale) < 0.001) return;
-        _lastAppliedScale = uiScale;
         let s = document.getElementById(_styleId);
+        if (s && Math.abs(_lastAppliedScale - uiScale) < 0.001) return;
+        _lastAppliedScale = uiScale;
         if (!s) {
             s = document.createElement("style");
             s.id = _styleId;
@@ -501,7 +501,7 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    const gearSVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    const gearSVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <circle cx="12" cy="12" r="3" fill="rgba(120,120,120,0.3)" stroke="rgba(153,153,153,0.6)" stroke-width="1"/>
         <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58z"
             fill="rgba(120,120,120,0.25)" stroke="rgba(120,120,120,0.4)" stroke-width="1.2"/>
@@ -513,6 +513,33 @@ function buildIgnoreGroupsUI(node) {
 
     /* ── 优化：wheel 监听器只绑定一次，不再在 buildDom 中重复添加 ── */
     rootEl.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
+
+    // Nodes 2.0 may reuse the Vue widget container after undo recreates the node.
+    // Mount this instance's DOM so its styles and handlers follow the live node.
+    let mountFrame = null;
+    function scheduleDomMount() {
+        if (mountFrame !== null) return;
+        mountFrame = requestAnimationFrame(() => {
+            mountFrame = null;
+            if (rootEl.isConnected || !app.graph?._nodes?.includes(node)) return;
+            const vueNode = document.querySelector(
+                `.lg-node[data-node-id="${CSS.escape(String(node.id))}"]`
+            );
+            const staleRoot = vueNode?.querySelector(".guhai-ig");
+            if (staleRoot && staleRoot !== rootEl) {
+                updateDynamicStyles();
+                staleRoot.replaceWith(rootEl);
+            }
+        });
+    }
+    const mountObserver = new MutationObserver(() => {
+        if (!rootEl.isConnected) scheduleDomMount();
+    });
+    mountObserver.observe(document.getElementById("graph-canvas-container") || document.body, {
+        childList: true,
+        subtree: true,
+    });
+    scheduleDomMount();
 
     let _lastBuildSig = "";
 
@@ -1154,6 +1181,8 @@ function buildIgnoreGroupsUI(node) {
     const timer = setInterval(() => {
         if (!node.graph) {
             clearInterval(timer);
+            mountObserver.disconnect();
+            if (mountFrame !== null) cancelAnimationFrame(mountFrame);
             document.removeEventListener("visibilitychange", onVisibilityChange);
             document.removeEventListener("keydown", onKeyDown);
             const s = document.getElementById(_styleId);
