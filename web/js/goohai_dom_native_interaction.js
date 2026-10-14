@@ -86,6 +86,7 @@ const ensureNativeSpaceMode = (event) => {
 export function installNativeNodePointerBridge(root, {
     getWidget = () => null,
     shouldForwardLeft = () => false,
+    shouldStartImmediately = () => false,
     onTap = null,
     forwardWheel = true,
 } = {}) {
