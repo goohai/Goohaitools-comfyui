@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageColor, ImageFilter
 import math
 
 class 孤海外补画板按目标宽高:
@@ -20,6 +20,7 @@ class 孤海外补画板按目标宽高:
                 "上扩比例": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.1}),
                 "羽化": ("INT", {"default": 0, "min": 0, "max": 500}),
                 "整除数": ([0, 8, 16, 32, 64], {"default": 0}),
+                "外补颜色": ("GHCOLOR", {"default": "#808080"}),
             },
             "optional": {
                 "遮罩": ("MASK",),
@@ -31,7 +32,7 @@ class 孤海外补画板按目标宽高:
     FUNCTION = "处理"
     CATEGORY = "孤海工具箱"
     
-    def 处理(self, 图像, 目标宽度, 目标高度, 左扩比例, 上扩比例, 羽化, 整除数, 遮罩=None):
+    def 处理(self, 图像, 目标宽度, 目标高度, 左扩比例, 上扩比例, 羽化, 整除数, 遮罩=None, 外补颜色="#808080"):
         # 获取输入图像尺寸
         _, orig_h, orig_w, _ = 图像.shape
         原尺寸 = (orig_w, orig_h)
@@ -44,7 +45,7 @@ class 孤海外补画板按目标宽高:
             扩展信息 = self._应用整除数(扩展信息, 整除数)
         
         # 处理图像
-        输出图像 = self._创建输出图像(图像, 扩展信息)
+        输出图像 = self._创建输出图像(图像, 扩展信息, 外补颜色)
         
         # 处理遮罩（此处调用逻辑不变，但内部实现已反转）
         输出遮罩 = self._创建输出遮罩(遮罩, 扩展信息, 原尺寸, 羽化)
@@ -130,9 +131,10 @@ class 孤海外补画板按目标宽高:
         
         return 扩展信息
     
-    def _创建输出图像(self, 图像, 扩展信息):
+    def _创建输出图像(self, 图像, 扩展信息, 外补颜色="#808080"):
         目标宽, 目标高 = 扩展信息["目标宽"], 扩展信息["目标高"]
-        结果 = torch.full((1, 目标高, 目标宽, 3), 0.5, dtype=torch.float32)
+        结果 = torch.empty((1, 目标高, 目标宽, 3), dtype=torch.float32)
+        结果[:] = torch.tensor(ImageColor.getrgb(外补颜色), dtype=torch.float32) / 255.0
         
         原始图像 = 图像
         
@@ -246,6 +248,7 @@ class 孤海外补画板按比例:
                 "上扩比例": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.1}),
                 "羽化": ("INT", {"default": 0, "min": 0, "max": 500}),
                 "整除数": ([0, 8, 16, 32, 64], {"default": 0}),
+                "外补颜色": ("GHCOLOR", {"default": "#808080"}),
             },
             "optional": {
                 "遮罩": ("MASK",),
@@ -257,7 +260,7 @@ class 孤海外补画板按比例:
     FUNCTION = "处理"
     CATEGORY = "孤海工具箱"
     
-    def 处理(self, 图像, 比例宽, 比例高, 左扩比例, 上扩比例, 羽化, 整除数, 遮罩=None):
+    def 处理(self, 图像, 比例宽, 比例高, 左扩比例, 上扩比例, 羽化, 整除数, 遮罩=None, 外补颜色="#808080"):
         # 获取输入图像尺寸
         _, orig_h, orig_w, _ = 图像.shape
         原尺寸 = (orig_w, orig_h)
@@ -270,7 +273,7 @@ class 孤海外补画板按比例:
             扩展信息 = self._应用整除数(扩展信息, 整除数)
         
         # 处理图像
-        输出图像 = self._创建输出图像(图像, 扩展信息)
+        输出图像 = self._创建输出图像(图像, 扩展信息, 外补颜色)
         
         # 处理遮罩
         输出遮罩 = self._创建输出遮罩(遮罩, 扩展信息, 原尺寸, 羽化)
@@ -351,11 +354,12 @@ class 孤海外补画板按比例:
         
         return 扩展信息
     
-    def _创建输出图像(self, 图像, 扩展信息):
+    def _创建输出图像(self, 图像, 扩展信息, 外补颜色="#808080"):
         """创建输出图像逻辑"""
-        # 创建灰色背景 (RGB模式，灰色值为0.5)
+        # 使用外补颜色创建背景
         目标宽, 目标高 = 扩展信息["目标宽"], 扩展信息["目标高"]
-        结果 = torch.full((1, 目标高, 目标宽, 3), 0.5, dtype=torch.float32)
+        结果 = torch.empty((1, 目标高, 目标宽, 3), dtype=torch.float32)
+        结果[:] = torch.tensor(ImageColor.getrgb(外补颜色), dtype=torch.float32) / 255.0
         
         # 获取原始图像
         原始图像 = 图像
@@ -453,6 +457,7 @@ class 孤海外补画板按方向:
                 "下": ("INT", {"default": 0, "min": 0, "max": 3000}),
                 "羽化": ("INT", {"default": 0, "min": 0, "max": 500}),
                 "整除数": ([0, 8, 16, 32, 64], {"default": 0}),
+                "外补颜色": ("GHCOLOR", {"default": "#808080"}),
             },
             "optional": {
                 "遮罩": ("MASK",),
@@ -464,7 +469,7 @@ class 孤海外补画板按方向:
     FUNCTION = "处理"
     CATEGORY = "孤海工具箱"
     
-    def 处理(self, 图像, 单位, 左, 右, 上, 下, 羽化, 整除数, 遮罩=None):
+    def 处理(self, 图像, 单位, 左, 右, 上, 下, 羽化, 整除数, 遮罩=None, 外补颜色="#808080"):
         # 获取输入图像尺寸
         _, orig_h, orig_w, _ = 图像.shape
         原尺寸 = (orig_w, orig_h)
@@ -480,7 +485,7 @@ class 孤海外补画板按方向:
             扩展信息 = self._应用整除数(扩展信息, 整除数, 裁剪模式)
         
         # 处理图像
-        输出图像 = self._创建输出图像(图像, 扩展信息, 裁剪模式)
+        输出图像 = self._创建输出图像(图像, 扩展信息, 裁剪模式, 外补颜色)
         
         # 处理遮罩
         输出遮罩 = self._创建输出遮罩(遮罩, 扩展信息, 原尺寸, 羽化, 裁剪模式)
@@ -577,7 +582,7 @@ class 孤海外补画板按方向:
         
         return 扩展信息
     
-    def _创建输出图像(self, 图像, 扩展信息, 裁剪模式):
+    def _创建输出图像(self, 图像, 扩展信息, 裁剪模式, 外补颜色="#808080"):
         """创建输出图像逻辑"""
         if 裁剪模式:
             # 裁剪模式：直接裁剪原始图像
@@ -606,9 +611,10 @@ class 孤海外补画板按方向:
             
             return 输出图像
         else:
-            # 扩展模式：创建灰色背景并放置原始图像
+            # 扩展模式：使用外补颜色创建背景并放置原始图像
             目标宽, 目标高 = 扩展信息["目标宽"], 扩展信息["目标高"]
-            结果 = torch.full((1, 目标高, 目标宽, 3), 0.5, dtype=torch.float32)
+            结果 = torch.empty((1, 目标高, 目标宽, 3), dtype=torch.float32)
+            结果[:] = torch.tensor(ImageColor.getrgb(外补颜色), dtype=torch.float32) / 255.0
             
             # 获取原始图像
             原始图像 = 图像

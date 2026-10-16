@@ -118,7 +118,7 @@ async function inflateBytes(bytes) {
 }
 
 async function colorLayersPngChunk(layers, order, width, height) {
-    const bits = new Uint8Array(width * height);
+    const bits = new Uint16Array(width * height);
     for (let layerIndex = 0; layerIndex < order.length; layerIndex++) {
         const canvas = layers.get(order[layerIndex]);
         if (!canvas) continue;
@@ -126,10 +126,16 @@ async function colorLayersPngChunk(layers, order, width, height) {
         const bit = 1 << layerIndex;
         for (let index = 0; index < bits.length; index++) if (alpha[index * 4 + 3] > 5) bits[index] |= bit;
     }
-    const compressed = await deflateBytes(bits);
+    const wide = bits.some((value) => value > 255);
+    const bytes = new Uint8Array(bits.length * (wide ? 2 : 1));
+    for (let index = 0; index < bits.length; index++) {
+        bytes[index * (wide ? 2 : 1)] = bits[index] & 0xff;
+        if (wide) bytes[index * 2 + 1] = bits[index] >>> 8;
+    }
+    const compressed = await deflateBytes(bytes);
     const payload = new Uint8Array(8 + compressed.length);
     writeU32(payload, 0, width); writeU32(payload, 4, height); payload.set(compressed, 8);
-    return pngChunk("ghCL", payload);
+    return pngChunk(wide ? "ghCM" : "ghCL", payload);
 }
 
 async function readColorLayersChunk(url) {
@@ -141,12 +147,18 @@ async function readColorLayersChunk(url) {
     while (offset + 12 <= bytes.length) {
         const length = ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
         const type = new TextDecoder().decode(bytes.subarray(offset + 4, offset + 8));
-        if (type === "ghCL" && length >= 8) {
+        if ((type === "ghCL" || type === "ghCM") && length >= 8) {
             const data = bytes.subarray(offset + 8, offset + 8 + length);
             const width = ((data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]) >>> 0;
             const height = ((data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7]) >>> 0;
-            const bits = await inflateBytes(data.subarray(8));
-            return bits.length === width * height ? { width, height, bits } : null;
+            const decoded = await inflateBytes(data.subarray(8));
+            const wide = type === "ghCM";
+            if (decoded.length !== width * height * (wide ? 2 : 1)) return null;
+            const bits = new Uint16Array(width * height);
+            for (let index = 0; index < bits.length; index++) {
+                bits[index] = wide ? decoded[index * 2] | (decoded[index * 2 + 1] << 8) : decoded[index];
+            }
+            return { width, height, bits };
         }
         offset += 12 + length;
     }
@@ -533,6 +545,7 @@ class GoohaiMaskEditor {
                             <button class="guhai-mask-output-swatch" data-output-color="cyan" title="青"></button>
                             <button class="guhai-mask-output-swatch" data-output-color="blue" title="蓝"></button>
                             <button class="guhai-mask-output-swatch" data-output-color="purple" title="紫"></button>
+                            <button class="guhai-mask-output-swatch" data-output-color="gray" title="128 中性灰"></button>
                         </div>
                     </div>
                     <div class="guhai-mask-output-row guhai-mask-output-opacity-row">
@@ -589,6 +602,7 @@ class GoohaiMaskEditor {
         this.outputColors = {
             white: "#ffffff", red: "#ff3030", orange: "#ff8c20", yellow: "#ffe52e",
             green: "#28d66f", cyan: "#24d9d1", blue: "#347cff", purple: "#b04cff",
+            gray: "#808080",
         };
         this.colorOrder = Object.keys(this.outputColors);
         this.colorLayers = new Map();
@@ -2734,6 +2748,7 @@ function colorOutputPreviewUrl(sources, outputState) {
         const colors = [
             [255, 255, 255], [255, 48, 48], [255, 140, 32], [255, 229, 46],
             [40, 214, 111], [36, 217, 209], [52, 124, 255], [176, 76, 255],
+            [128, 128, 128],
         ];
         const layerCanvas = document.createElement("canvas");
         layerCanvas.width = savedLayers.width;
@@ -2757,7 +2772,7 @@ function colorOutputPreviewUrl(sources, outputState) {
             }
         }
         if (outputState.inverted) {
-            const colorNames = ["white", "red", "orange", "yellow", "green", "cyan", "blue", "purple"];
+            const colorNames = ["white", "red", "orange", "yellow", "green", "cyan", "blue", "purple", "gray"];
             const fallback = colors[Math.max(0, colorNames.indexOf(outputState.color))] || colors[1];
             const source = new Uint8ClampedArray(layerImage.data);
             for (let index = 0; index < savedLayers.bits.length; index++) {
@@ -3632,4 +3647,3 @@ app.registerExtension({
         };
     },
 });
-
