@@ -95,7 +95,7 @@ def _resize_contain_black(image, width, height):
 
     left = (width - content_width) // 2
     top = (height - content_height) // 2
-    canvas = image.new_zeros((1, height, width, image.shape[-1]))
+    canvas = image.new_full((1, height, width, image.shape[-1]), 128.0 / 255.0)
     if image.shape[-1] > 3:
         canvas[:, :, :, 3:] = 1.0
     canvas[:, top:top + content_height, left:left + content_width] = resized
@@ -110,7 +110,7 @@ def _resize_contain_black(image, width, height):
         "padding_top": top,
         "padding_right": width - left - content_width,
         "padding_bottom": height - top - content_height,
-        "fill_value": 0.0,
+        "fill_value": 128.0 / 255.0,
     }
 
 
@@ -241,7 +241,7 @@ class TextEncodeQwenImage21GH:
         if primary is not None:
             primary_matches_target = _cover_crop_is_small(
                 primary.shape[2], primary.shape[1], latent_width, latent_height
-            ) and latent_width * latent_height <= MAX_REFERENCE_AREA
+            )
             if not primary_matches_target and ref_image_size == "自动" and len(images) <= 2:
                 # Preserve the original 1–2 image behavior: a far-aspect-ratio
                 # primary reference establishes the shared rounded area for
@@ -267,7 +267,7 @@ class TextEncodeQwenImage21GH:
             "padding_top": 0,
             "padding_right": 0,
             "padding_bottom": 0,
-            "fill_value": 0.0,
+            "fill_value": 128.0 / 255.0,
         }
         for index in range(1, MAX_IMAGES + 1):
             image = images.get(index)
@@ -306,9 +306,12 @@ class TextEncodeQwenImage21GH:
         positive = clip.encode_from_tokens_scheduled(
             clip.tokenize(prompt, images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
         )
-        negative = clip.encode_from_tokens_scheduled(
-            clip.tokenize(negative_prompt, images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
-        )
+        # This node is intended for CFG=1 workflows, where ComfyUI skips the
+        # unconditional branch during sampling. Keep the negative input/output
+        # ports for workflow compatibility, but avoid a second Qwen text/
+        # vision encoding pass. If CFG is raised above 1 downstream, the
+        # negative prompt will intentionally have no effect.
+        negative = positive
         if ref_latents:
             values = {"reference_latents": ref_latents}
             positive = node_helpers.conditioning_set_values(positive, values, append=True)
