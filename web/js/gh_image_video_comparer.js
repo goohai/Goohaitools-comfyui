@@ -2218,7 +2218,15 @@ function createComparer(node) {
         getMinHeight: () => 180,
         getMaxHeight: () => undefined,
         afterResize: () => updatePreviewLayout(state),
+        surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
     });
+    // ComfyUI 0.40+ checks the canvas surface when deciding whether a
+    // DOMWidget is visible, including in Legacy LiteGraph mode.
+    if (widget?.visibility?.surfaces) {
+        widget.visibility.surfaces.canvas = "shown";
+        widget.visibility.surfaces.panel = "never";
+        widget.visibility.surfaces.vueNode = "shown";
+    }
     widget.options ??= {};
     widget.options.minNodeSize = [MIN_NODE_WIDTH, MIN_NODE_HEIGHT];
     node.setSize?.([Math.max(node.size[0], MIN_NODE_WIDTH), Math.max(node.size[1], MIN_NODE_HEIGHT)]);

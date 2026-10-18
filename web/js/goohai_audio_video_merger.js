@@ -748,7 +748,13 @@ function createWidget(node, reference) {
                 root.style.display = ""; root.style.pointerEvents = ""; info.style.display = ""; media.style.display = ""; mute.style.display = "";
                 return getPreviewLayoutHeight(item, Number(node.size?.[0]) || 300);
             },
+            surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
         });
+        if (widget?.visibility?.surfaces) {
+            widget.visibility.surfaces.canvas = "shown";
+            widget.visibility.surfaces.panel = "never";
+            widget.visibility.surfaces.vueNode = "shown";
+        }
         widget.serialize = false;
         widget.computeSize = (width) => {
             if (!findSaveFlag(node) || !video.src || !video.videoWidth) { root.style.display = "none"; root.style.pointerEvents = "none"; info.style.display = "none"; media.style.display = "none"; mute.style.display = "none"; return [0, 0]; }

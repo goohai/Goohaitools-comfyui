@@ -639,7 +639,14 @@ function buildIgnoreGroupsUI(node) {
     const domWidget = node.addDOMWidget("guhai_ig", "ig_custom", rootEl, {
         serialize: false,
         hideOnZoom: false,
+        surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
     });
+
+    if (domWidget?.visibility?.surfaces) {
+        domWidget.visibility.surfaces.canvas = "shown";
+        domWidget.visibility.surfaces.panel = "never";
+        domWidget.visibility.surfaces.vueNode = "shown";
+    }
 
     if (domWidget) {
         domWidget.computeSize = function () {

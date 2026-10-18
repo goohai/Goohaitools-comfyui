@@ -163,8 +163,13 @@ function _initGallery(node) {
         "marriage_gallery",
         "marriage_gallery",
         root,
-        { hideOnZoom: false }
+        { hideOnZoom: false, surfaces: { canvas: "shown", vueNode: "shown", panel: "never" } }
     );
+    if (dw?.visibility?.surfaces) {
+        dw.visibility.surfaces.canvas = "shown";
+        dw.visibility.surfaces.panel = "never";
+        dw.visibility.surfaces.vueNode = "shown";
+    }
     dw.serialize = false;
 
     /* 固定高度计算 */

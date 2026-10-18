@@ -127,13 +127,15 @@ const createColorDomWidget = (node, inputName, inputData) => {
         getMinHeight: getLayoutHeight,
         getMaxHeight: getLayoutHeight,
         hideOnZoom: false,
+        surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
     });
     // Let LiteGraph place this widget in the same layout flow as native
     // widgets; each frontend version can apply its own standard widget gap.
     domWidget.computeSize = (width) => [width ?? node.size?.[0] ?? 0, getControlHeight()];
     domWidget.value = currentColor;
     if (domWidget.visibility?.surfaces) {
-        domWidget.visibility.surfaces.canvas = "never";
+        // Keep the widget visible to the Legacy DOM overlay in ComfyUI 0.40+.
+        domWidget.visibility.surfaces.canvas = "shown";
         domWidget.visibility.surfaces.panel = "never";
         domWidget.visibility.surfaces.vueNode = "shown";
     }

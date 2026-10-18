@@ -711,7 +711,13 @@ function createPreview(node) {
     const widget = node.addDOMWidget("gh_display_preview", "gh_display", root, {
         serialize: false, hideOnZoom: false, getMinHeight: () => 140,
         getMaxHeight: () => undefined,
+        surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
     });
+    if (widget?.visibility?.surfaces) {
+        widget.visibility.surfaces.canvas = "shown";
+        widget.visibility.surfaces.panel = "never";
+        widget.visibility.surfaces.vueNode = "shown";
+    }
     widget.serialize = false;
     widget.options ??= {};
     widget.options.minNodeSize = [250, 200];

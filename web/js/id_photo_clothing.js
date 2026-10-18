@@ -590,7 +590,13 @@ app.registerExtension({
             const galleryWidget = node.addDOMWidget("clothing_gallery", "div", container, {
                 serialize: false,
                 hideOnZoom: false,
+                surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
             });
+            if (galleryWidget?.visibility?.surfaces) {
+                galleryWidget.visibility.surfaces.canvas = "shown";
+                galleryWidget.visibility.surfaces.panel = "never";
+                galleryWidget.visibility.surfaces.vueNode = "shown";
+            }
 
             galleryWidget.computeSize = () => [0, 0];
 

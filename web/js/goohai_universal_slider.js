@@ -400,10 +400,13 @@ function setupSliderDom(node) {
         getMinHeight: () => 60,
         getMaxHeight: () => 60,
         hideOnZoom: false,
+        surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
     });
     domWidget.serialize = false;
     if (domWidget.visibility?.surfaces) {
-        domWidget.visibility.surfaces.canvas = "never";
+        // 0.40+ checks DOMWidget.isVisible() against the canvas surface in
+        // Legacy mode; "never" hides the DOM overlay before it can mount.
+        domWidget.visibility.surfaces.canvas = "shown";
         domWidget.visibility.surfaces.panel = "never";
         domWidget.visibility.surfaces.vueNode = "shown";
     }

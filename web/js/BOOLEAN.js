@@ -30,7 +30,17 @@ app.registerExtension({
     name: "goohaitools.bool_switch",
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "布尔孤海") return;
+        // Different ComfyUI frontend generations expose either the backend
+        // class name, the display name, or (in some Nodes 2.0 builds) both.
+        // Match all of them so the custom widget is not silently skipped.
+        const names = [
+            nodeData?.name,
+            nodeData?.display_name,
+            nodeData?.displayName,
+            nodeType?.comfyClass,
+            nodeType?.type,
+        ].filter(Boolean).map((value) => String(value).replace(/\s+/g, "").toLowerCase());
+        if (!names.includes("布尔孤海")) return;
 
         const origOnCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
@@ -57,8 +67,6 @@ app.registerExtension({
 function buildCustomSwitch(node) {
     const boolWidget = node.widgets?.find((w) => w.name === "开关");
     if (!boolWidget) return;
-
-    boolWidget.hidden = true;
 
     let isOn = !!boolWidget.value;
     let labelText = (node.properties && node.properties.guhai_label) || "开关";
@@ -151,25 +159,40 @@ function buildCustomSwitch(node) {
             input.addEventListener("blur", finish);
         });
 
-        domWidget = node.addDOMWidget("guhai_toggle_dom", "toggle_custom_dom", root, {
-            getValue: () => String(boolWidget.value),
-            setValue: (value) => setBoolValue(value === true || value === "true", false, "dom"),
-            getHeight: () => BOOL_WIDGET_HEIGHT,
-            getMinHeight: () => BOOL_WIDGET_HEIGHT,
-            getMaxHeight: () => BOOL_WIDGET_HEIGHT,
-            hideOnZoom: false,
-        });
-        domWidget.serialize = false;
-        if (domWidget.visibility?.surfaces) {
-            domWidget.visibility.surfaces.canvas = "never";
-            domWidget.visibility.surfaces.panel = "never";
-            domWidget.visibility.surfaces.vueNode = "shown";
+        try {
+            domWidget = node.addDOMWidget("guhai_toggle_dom", "toggle_custom_dom", root, {
+                getValue: () => String(boolWidget.value),
+                setValue: (value) => setBoolValue(value === true || value === "true", false, "dom"),
+                getHeight: () => BOOL_WIDGET_HEIGHT,
+                getMinHeight: () => BOOL_WIDGET_HEIGHT,
+                getMaxHeight: () => BOOL_WIDGET_HEIGHT,
+                hideOnZoom: false,
+                surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
+            });
+            domWidget.serialize = false;
+            if (domWidget.visibility?.surfaces) {
+                // ComfyUI 0.40+ uses the canvas surface for DOMWidget's
+                // visibility test even in Legacy LiteGraph mode.  Keeping it
+                // at "never" suppresses the overlay entirely.
+                domWidget.visibility.surfaces.canvas = "shown";
+                domWidget.visibility.surfaces.panel = "never";
+                domWidget.visibility.surfaces.vueNode = "shown";
+            }
+            // Only hide the native widget once its replacement exists.  This
+            // preserves the ordinary checkbox in older Legacy LiteGraph
+            // builds that do not implement addDOMWidget.
+            boolWidget.hidden = true;
+        } catch (error) {
+            domWidget = null;
+            console.warn("[Goohai Boolean] DOM widget unavailable; using native checkbox", error);
         }
         syncDom();
     }
 
-    node.size[0] = GOOHAI_NODE_WIDTH;
-    node.size[1] = GOOHAI_NODE_HEIGHT;
+    if (domWidget && node.size) {
+        node.size[0] = GOOHAI_NODE_WIDTH;
+        node.size[1] = GOOHAI_NODE_HEIGHT;
+    }
 
     /* ── 工作流加载后同步 UI ── */
     node._guhaiSyncUI = () => {
