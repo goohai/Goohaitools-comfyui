@@ -185,24 +185,9 @@ class TextEditorBaseNode extends LGraphNode {
         }
     }
 
-    configure(info) {
-        if (info.properties) Object.assign(this.properties, info.properties);
-        if (info.pos) this.pos = info.pos;
-        if (info.size) this.size = info.size;
-        if (info.flags) this.flags = info.flags;
-    }
-
-    serialize() {
-        const data = super.serialize();
-        if (!data.id && this.id) data.id = this.id;
-        if (!data.order && this.order !== undefined) data.order = this.order;
-        if (!data.mode && this.mode !== undefined) data.mode = this.mode;
-        data.properties = { ...this.properties };
-        if (!data.pos && this.pos) data.pos = [...this.pos];
-        if (!data.size && this.size) data.size = [...this.size];
-        if (!data.flags && this.flags) data.flags = { ...this.flags };
-        return data;
-    }
+    // Use LiteGraph's configure/serialize lifecycle. Its serializer already
+    // JSON-clones properties, including third-party reactive ue_properties.
+    // Replacing that result with a shallow copy leaks proxies into workflows.
 }
 
 class TextEditorNode extends TextEditorBaseNode {
@@ -735,11 +720,6 @@ class TextEditorNode extends TextEditorBaseNode {
             this.updateTextareaStyle();
         };
 
-        const origOCC = canvas.onCanvasChanged;
-        canvas.onCanvasChanged = (evt) => {
-            origOCC && origOCC.call(canvas, evt);
-            this.updateEditorsPosition();
-        };
         this.canvasUpdateInterval = setInterval(() => this.updateEditorsPosition(), 16);
 
         this.editTextarea.addEventListener("keydown", (e) => {
@@ -921,11 +901,8 @@ class TextEditorNode extends TextEditorBaseNode {
     }
 
     onMouseDown(evt, pos) {
-        if (!this.isEditing && evt?.button === 2) {
-            beginFontResize(this, evt, pos);
-        }
-        if (!this.isEditing && this.linkAreas && this.linkAreas.length > 0) {
-            const lp = [pos[0] - this.pos[0], pos[1] - this.pos[1]];
+        if (!this.isEditing && evt?.button === 0 && this.linkAreas && this.linkAreas.length > 0) {
+            const lp = pos;
             for (const a of this.linkAreas) {
                 if (lp[0] >= a.x && lp[0] <= a.x + a.width && lp[1] >= a.y && lp[1] <= a.y + a.height) {
                     this.openLink(a.url);
@@ -1023,12 +1000,9 @@ LGraphCanvas.prototype.processMouseDown = function (e) {
     const node = this.graph.getNodeOnPos(canvasPos[0], canvasPos[1], this.visible_nodes);
     if (node && node.constructor === TextEditorNode && !node.isEditing) {
         const lp = [canvasPos[0] - node.pos[0], canvasPos[1] - node.pos[1]];
-        if (e.button === 2 && beginFontResize(node, e, canvasPos)) {
-            // Keep LiteGraph's normal right-click menu for a click; the move
-            // handler below takes over only after the pointer actually moves.
-            this._goohaiFontResizeStarted = true;
-        }
-        if (node.linkAreas && node.linkAreas.length > 0) {
+        // Keep LiteGraph's normal right-click menu until the pointer moves.
+        if (e.button === 2) beginFontResize(node, e, canvasPos);
+        if (e.button === 0 && node.linkAreas && node.linkAreas.length > 0) {
             for (const a of node.linkAreas) {
                 if (lp[0] >= a.x && lp[0] <= a.x + a.width &&
                     lp[1] >= a.y && lp[1] <= a.y + a.height) {
@@ -1077,6 +1051,11 @@ let suppressNoteContextMenuUntil = 0;
 function getTextNodeAtMouseEvent(e) {
     const canvas = LGraphCanvas.active_canvas;
     if (!canvas || !canvas.graph || !canvas.canvas) return null;
+    const target = e.target;
+    if (!(target instanceof Element)) return null;
+    if (target.closest("input, textarea, select, button, a, [contenteditable], [role='slider'], .goohai-note-toolbar")) return null;
+    const nodeBody = target.closest('[data-testid^="node-body-"]');
+    if (target !== canvas.canvas && !nodeBody) return null;
     const rect = canvas.canvas.getBoundingClientRect();
     const scale = canvas.ds?.scale || 1;
     const offset = canvas.ds?.offset || [0, 0];
@@ -1171,26 +1150,6 @@ function updateFontResize(e) {
     return true;
 }
 
-const _origPMMove = LGraphCanvas.prototype.processMouseMove;
-if (typeof _origPMMove === "function") {
-    LGraphCanvas.prototype.processMouseMove = function (e) {
-        if (fontResizeState && updateFontResize(e)) return false;
-        return _origPMMove.apply(this, arguments);
-    };
-}
-
-const _origPMUp = LGraphCanvas.prototype.processMouseUp;
-if (typeof _origPMUp === "function") {
-    LGraphCanvas.prototype.processMouseUp = function (e) {
-        if (fontResizeState) {
-            if (fontResizeState.moved) suppressNoteContextMenuUntil = Date.now() + 300;
-            fontResizeState = null;
-            return false;
-        }
-        return _origPMUp.apply(this, arguments);
-    };
-}
-
 document.addEventListener("mouseup", function (e) {
     if (fontResizeState?.moved) suppressNoteContextMenuUntil = Date.now() + 300;
     if (fontResizeState && LGraphCanvas.active_canvas?.canvas?.releasePointerCapture) {
@@ -1204,6 +1163,9 @@ document.addEventListener("pointerup", function () {
     fontResizeState = null;
 }, true);
 
+document.addEventListener("pointercancel", () => { fontResizeState = null; }, true);
+window.addEventListener("blur", () => { fontResizeState = null; });
+
 document.addEventListener("contextmenu", function (e) {
     if (Date.now() < suppressNoteContextMenuUntil || fontResizeState?.moved) {
         e.preventDefault();
@@ -1215,7 +1177,7 @@ document.addEventListener("contextmenu", function (e) {
 
 // Nodes 2.0 HTML VUE覆盖层双击穿透
 document.addEventListener("dblclick", function (e) {
-    const nodeBody = e.target.closest('[data-testid^="node-body-"]');
+    const nodeBody = e.target.closest?.('[data-testid^="node-body-"]');
     if (!nodeBody) return;
 
     if (e.target.closest(
@@ -1228,12 +1190,11 @@ document.addEventListener("dblclick", function (e) {
 
 
     const testId = nodeBody.getAttribute("data-testid");
-    const match = testId.match(/node-body-(\d+)/);
+    const match = testId.match(/^node-body-(.+)$/);
     if (!match) return;
 
-    const nodeId = parseInt(match[1]);
-    const node = app.graph?.getNodeById(nodeId);
-    if (!node) return;
+    const node = app.canvas?.graph?.getNodeById(match[1]);
+    if (!(node instanceof TextEditorNode)) return;
 
 
     if (typeof node.onDblClick === "function") {

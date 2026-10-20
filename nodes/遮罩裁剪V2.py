@@ -205,6 +205,19 @@ class 孤海_遮罩裁剪V2:
         图像_np = 图像[0].cpu().numpy()
         遮罩_np = 遮罩[0].cpu().numpy()
 
+        原始高, 原始宽 = 图像_np.shape[:2]
+        有效区域 = (遮罩_np > 0.1).astype(np.uint8)
+        if cv2.countNonZero(有效区域):
+            _, 连通标签, 连通统计, _ = cv2.connectedComponentsWithStats(有效区域, connectivity=8)
+            最大连通面积 = int(连通统计[1:, cv2.CC_STAT_AREA].max())
+            del 连通标签
+        else:
+            最大连通面积 = 0
+        # 在填孔和裁剪前替换，接缝中保存的原始遮罩也必须是这张全白遮罩。
+        if 最大连通面积 < 原始高 * 原始宽 * 0.002:
+            遮罩 = torch.ones((1, 原始高, 原始宽), dtype=遮罩.dtype, device=遮罩.device)
+            遮罩_np = 遮罩[0].cpu().numpy()
+
         # 保存填充后的遮罩到接缝数据
         填充后遮罩_np = 遮罩_np.copy()
 
@@ -212,22 +225,13 @@ class 孤海_遮罩裁剪V2:
         if 遮罩填充:
             填充后遮罩_np = self.填充遮罩孔洞(遮罩_np)
 
-        # 获取原像素
-        原始高, 原始宽 = 图像_np.shape[:2]
-
         # 找到遮罩的非零区域边界（使用填充后的遮罩）
         非零区域 = np.where(填充后遮罩_np > 0.1)  # 使用阈值避免噪点
-        if len(非零区域[0]) == 0:
-            # 如果没有遮罩区域，使用整个图像
-            最小y, 最大y, 最小x, 最大x = 0, 原始高, 0, 原始宽
-            遮罩宽 = 原始宽
-            遮罩高 = 原始高
-        else:
-            最小y, 最大y = np.min(非零区域[0]), np.max(非零区域[0])
-            最小x, 最大x = np.min(非零区域[1]), np.max(非零区域[1])
-            # np.max返回的是最大索引(0-based)，实际尺寸需要+1
-            遮罩宽 = 最大x - 最小x + 1
-            遮罩高 = 最大y - 最小y + 1
+        最小y, 最大y = np.min(非零区域[0]), np.max(非零区域[0])
+        最小x, 最大x = np.min(非零区域[1]), np.max(非零区域[1])
+        # np.max返回的是最大索引(0-based)，实际尺寸需要+1
+        遮罩宽 = 最大x - 最小x + 1
+        遮罩高 = 最大y - 最小y + 1
 
         # 计算遮罩最短边
         遮罩最短边 = min(遮罩宽, 遮罩高)
@@ -463,6 +467,8 @@ class 孤海_裁剪恢复:
             "optional": {
                 "裁剪遮罩": ("MASK",),
                 "背景图像": ("IMAGE",),
+                "颜色还原强度": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.1,
+                                     "tooltip": "与原图对应裁剪区域比较，统一修正返回裁剪图的明度和颜色；0为关闭"}),
             }
         }
 
@@ -503,12 +509,7 @@ class 孤海_裁剪恢复:
         return max(1, 像素值)  # 确保至少为1像素，避免为0
 
     def 创建羽化遮罩(self, 遮罩, 扩展, 羽化):
-        """使用距离变换快速生成扩展和向内线性羽化遮罩。
-
-        先生成扩展后的遮罩，再根据扩展后边界到内部的距离计算羽化值：
-        边界为0，向中心经过羽化半径后为1。这样不会扩大输出画布，也
-        不会像高斯模糊一样让整张遮罩变灰。
-        """
+        """浮点扩展与有限半径高斯羽化，核的尾部平滑归零。"""
         if 扩展 == 0 and 羽化 == 0:
             return 遮罩
 
@@ -516,50 +517,70 @@ class 孤海_裁剪恢复:
         if 遮罩.ndim == 3:
             遮罩 = 遮罩[:, :, 0] if 遮罩.shape[2] > 1 else 遮罩[:, :, 0]
 
-        # 用阈值提取实心区域。裁剪恢复使用的是区域遮罩，扩展和羽化
-        # 都按边界距离计算，避免创建随半径平方增长的大型卷积核。
-        二值遮罩 = np.asarray(遮罩 >= 0.5, dtype=np.uint8)
-        if not np.any(二值遮罩):
-            return np.zeros_like(遮罩, dtype=np.float32)
+        # 从这里开始保持float32。遮罩如果先压成uint8再模糊，大半径时
+        # 只有256个灰度级，容易在贴回后形成可见的波纹和断层。
+        遮罩_float = np.clip(遮罩, 0.0, 1.0).astype(np.float32, copy=False)
 
-        扩展半径 = max(0.0, float(扩展))
-        羽化半径 = max(0.0, float(羽化))
+        # 扩展遮罩。小半径保留原始椭圆膨胀；大半径使用距离变换，
+        # 避免创建边长为(2*扩展+1)的大型结构元素。
+        if 扩展 > 0:
+            if 扩展 <= 64:
+                核大小 = max(3, int(扩展) * 2 + 1)  # 确保是奇数
+                核 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (核大小, 核大小))
+                遮罩_float = cv2.dilate(遮罩_float, 核, iterations=1)
+            else:
+                # distanceTransform 的耗时主要与像素数量有关，基本不随
+                # 扩展半径平方增长；使用非零像素作为原始遮罩区域。
+                前景 = (遮罩_float > 1e-6).astype(np.uint8)
+                到前景距离 = cv2.distanceTransform(1 - 前景, cv2.DIST_L2, 3)
+                扩展区域 = 到前景距离 <= float(扩展)
+                遮罩_float[扩展区域] = 1.0
 
-        # 计算扩展后的硬遮罩。扩展半径为0时直接保留原遮罩，避免
-        # distanceTransform 的边界近似导致原始边缘出现额外像素。
-        if 扩展半径 > 0.0:
-            背景距离 = cv2.distanceTransform(1 - 二值遮罩, cv2.DIST_L2, 3)
-            扩展遮罩 = (二值遮罩 != 0) | (背景距离 <= 扩展半径)
-        else:
-            扩展遮罩 = 二值遮罩 != 0
+        # 旧核在半径处仍有较大权重，硬截断后，透明区的第一步就会
+        # 跳到非零值。对核的外半段平滑收尾，使过渡的两端斜率归零。
+        if 羽化 > 0:
+            羽化 = float(羽化)
+            原高, 原宽 = 遮罩_float.shape[:2]
+            缩小倍数 = max(1, int(math.ceil(羽化 / 64.0)))
+            工作宽 = max(1, int(round(原宽 / 缩小倍数)))
+            工作高 = max(1, int(round(原高 / 缩小倍数)))
+            if 缩小倍数 > 1:
+                工作遮罩 = cv2.resize(
+                    遮罩_float, (工作宽, 工作高), interpolation=cv2.INTER_AREA
+                )
+            else:
+                工作遮罩 = 遮罩_float
 
-        if 羽化半径 <= 0.0:
-            return 扩展遮罩.astype(np.float32, copy=False)
+            核列表 = []
+            for 工作半径 in (羽化 * 工作宽 / 原宽, 羽化 * 工作高 / 原高):
+                核半径 = max(1, int(math.ceil(工作半径)))
+                坐标 = np.arange(-核半径, 核半径 + 1, dtype=np.float64)
+                # 核覆盖的是像素单元，半像素余量也让1像素羽化保留邻域权重。
+                距离比例 = np.abs(坐标) / (工作半径 + 0.5)
+                收尾 = np.clip((距离比例 - 0.5) * 2.0, 0.0, 1.0)
+                平滑窗 = 1.0 - 收尾**3 * (收尾 * (收尾 * 6.0 - 15.0) + 10.0)
+                核 = np.exp(-0.5 * (坐标 / 工作半径)**2) * 平滑窗
+                核列表.append(核 / 核.sum())
+            工作遮罩 = cv2.sepFilter2D(
+                工作遮罩, -1, 核列表[0], 核列表[1], borderType=cv2.BORDER_REPLICATE
+            )
+            if 缩小倍数 > 1:
+                遮罩_float = cv2.resize(
+                    工作遮罩, (原宽, 原高), interpolation=cv2.INTER_LINEAR
+                )
+            else:
+                遮罩_float = 工作遮罩
 
-        # 计算扩展后遮罩内部到真实外边界的距离：边界接近0，越靠中心越大。
-        # 在画布四周补一圈前景，等价于把画布外视为遮罩内部，避免画布
-        # 边缘被误当成羽化边界。这样贴边部分不会变灰，只有遮罩内部
-        # 的真实黑白交界处参与羽化。
-        扩展遮罩_uint8 = 扩展遮罩.astype(np.uint8)
-        if np.any(~扩展遮罩):
-            带虚拟画布外边界 = np.pad(扩展遮罩_uint8, 1, mode="constant", constant_values=1)
-            内部距离 = cv2.distanceTransform(带虚拟画布外边界, cv2.DIST_L2, 3)[1:-1, 1:-1]
-        else:
-            # 整张画布都是遮罩时没有真实边界，整张保持不透明。
-            内部距离 = np.full(扩展遮罩.shape, np.inf, dtype=np.float32)
+        # 限制数值范围，避免边界插值或浮点误差造成极小的越界值。
+        return np.clip(遮罩_float, 0.0, 1.0).astype(np.float32, copy=False)
 
-        # OpenCV 将最外圈前景像素计为约1像素距离，扣除后让最外边缘
-        # 严格为0，再向内按指定半径线性增长到1。
-        内部距离 = np.maximum(内部距离 - 1.0, 0.0)
-        输出遮罩 = np.clip(内部距离 / 羽化半径, 0.0, 1.0)
-        输出遮罩[~扩展遮罩] = 0.0
-        # 画布边缘与遮罩重合的部分不参与羽化，保持完全不透明。
-        输出遮罩[0, :][扩展遮罩[0, :]] = 1.0
-        输出遮罩[-1, :][扩展遮罩[-1, :]] = 1.0
-        输出遮罩[:, 0][扩展遮罩[:, 0]] = 1.0
-        输出遮罩[:, -1][扩展遮罩[:, -1]] = 1.0
-
-        return 输出遮罩.astype(np.float32, copy=False)
+    def 缩放浮点遮罩(self, 遮罩, 宽, 高):
+        """遮罩缩放不经过8位量化，也不使用有振铃的LANCZOS。"""
+        遮罩 = np.clip(遮罩, 0.0, 1.0).astype(np.float32, copy=False)
+        if 遮罩.shape[:2] == (高, 宽):
+            return 遮罩
+        插值 = cv2.INTER_AREA if 高 <= 遮罩.shape[0] and 宽 <= 遮罩.shape[1] else cv2.INTER_LINEAR
+        return cv2.resize(遮罩, (宽, 高), interpolation=插值)
 
     def 恢复遮罩到原始位置(self, 裁剪遮罩, 接缝):
         """将裁剪遮罩恢复到与未缩放裁剪遮罩相同的大小和位置"""
@@ -581,9 +602,7 @@ class 孤海_裁剪恢复:
         # 检查尺寸是否匹配
         if 处理高 != 目标高 or 处理宽 != 目标宽:
             # 如果不匹配，先缩放到目标尺寸
-            pil裁剪遮罩 = Image.fromarray((裁剪遮罩_np * 255).astype(np.uint8))
-            pil裁剪遮罩 = pil裁剪遮罩.resize((目标宽, 目标高), Image.LANCZOS)
-            裁剪遮罩_np = np.array(pil裁剪遮罩).astype(np.float32) / 255.0
+            裁剪遮罩_np = self.缩放浮点遮罩(裁剪遮罩_np, 目标宽, 目标高)
 
         # 对于自定义宽高模式，需要先恢复到扩展后的尺寸
         if 输出尺寸模式 == "自定义宽高":
@@ -595,17 +614,7 @@ class 孤海_裁剪恢复:
                 裁剪遮罩_np = 有效区域
                 处理高, 处理宽 = 裁剪遮罩_np.shape[:2]
 
-            # 缩放到原始裁剪尺寸
-            pil裁剪遮罩 = Image.fromarray((裁剪遮罩_np * 255).astype(np.uint8))
-            恢复后_pil = pil裁剪遮罩.resize((原始裁剪宽, 原始裁剪高), Image.LANCZOS)
-            恢复后_np = np.array(恢复后_pil).astype(np.float32) / 255.0
-        else:
-            # 其他模式直接缩放到原始裁剪尺寸
-            pil裁剪遮罩 = Image.fromarray((裁剪遮罩_np * 255).astype(np.uint8))
-            恢复后_pil = pil裁剪遮罩.resize((原始裁剪宽, 原始裁剪高), Image.LANCZOS)
-            恢复后_np = np.array(恢复后_pil).astype(np.float32) / 255.0
-
-        return 恢复后_np
+        return self.缩放浮点遮罩(裁剪遮罩_np, 原始裁剪宽, 原始裁剪高)
 
     def 检查遮罩是否全黑(self, 遮罩):
         """检查遮罩是否全黑（几乎没有白色像素）"""
@@ -615,7 +624,65 @@ class 孤海_裁剪恢复:
         非零像素比例 = np.sum(遮罩 > 0.1) / 遮罩.size
         return 非零像素比例 < 0.001  # 如果非零像素比例小于0.1%，认为是全黑
 
-    def 恢复图像(self, 接缝, 裁剪图像, 遮罩扩展百分比, 遮罩羽化百分比, 裁剪遮罩=None, 背景图像=None):
+    def 匹配裁剪颜色(self, 裁剪, 参考, 强度):
+        """先排除明显重绘区域，再从轻微偏色的同位置像素估算统一校色。"""
+        if 强度 <= 0:
+            return 裁剪
+        高, 宽 = 裁剪.shape[:2]
+        比例 = min(1.0, 256.0 / max(高, 宽))
+        工作尺寸 = (max(1, round(宽 * 比例)), max(1, round(高 * 比例)))
+        源 = cv2.resize(裁剪, 工作尺寸, interpolation=cv2.INTER_AREA)
+        目标 = cv2.resize(参考, 工作尺寸, interpolation=cv2.INTER_AREA)
+
+        # 局部明暗结构基本不受整体偏色影响，降低新增/移除轮廓的采样权重。
+        源灰度 = cv2.cvtColor(源, cv2.COLOR_RGB2GRAY)
+        目标灰度 = cv2.cvtColor(目标, cv2.COLOR_RGB2GRAY)
+        源细节 = 源灰度 - cv2.GaussianBlur(源灰度, (0, 0), 1.5)
+        目标细节 = 目标灰度 - cv2.GaussianBlur(目标灰度, (0, 0), 1.5)
+        结构权重 = 1.0 / (1.0 + ((源细节 - 目标细节) / 0.02)**2)
+        # 仅接受轻微偏色：RGB各通道最多差24级，明度最多差18级（按0~255计）。
+        候选区域 = (np.max(np.abs(目标 - 源), axis=2) <= 24.0 / 255.0)
+        候选区域 &= (np.abs(目标灰度 - 源灰度) <= 18.0 / 255.0) & (结构权重 > 0.8)
+        # 避开缩小图中混入主体颜色的边界，取样不依赖遮罩形状或大小。
+        候选区域 = cv2.erode(候选区域.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        最少样本 = max(16, 候选区域.size * 0.05)
+        if np.count_nonzero(候选区域) < 最少样本:
+            return 裁剪
+        源 = 源[候选区域].astype(np.float64)
+        目标 = 目标[候选区域].astype(np.float64)
+        结构权重 = 结构权重[候选区域]
+        增益 = np.ones(3, dtype=np.float64)
+        偏移 = np.median(目标 - 源, axis=0)
+        for _ in range(6):
+            残差 = 目标 - (源 * 增益 + 偏移)
+            中心 = np.median(残差, axis=0)
+            尺度 = np.maximum(np.median(np.abs(残差 - 中心), axis=0) * 1.4826, 0.004)
+            偏差 = np.max(np.abs(残差 - 中心) / (4.685 * 尺度), axis=1)
+            权重 = np.maximum(1.0 - 偏差**2, 0.0)**2 * 结构权重
+            权重和 = 权重.sum()
+            if 权重和 < max(16, len(源) * 0.1):
+                return 裁剪
+            权重 = 权重[:, None] / 权重和
+            源均值 = (源 * 权重).sum(axis=0)
+            目标均值 = (目标 * 权重).sum(axis=0)
+            方差 = ((源 - 源均值)**2 * 权重).sum(axis=0)
+            协方差 = ((源 - 源均值) * (目标 - 目标均值) * 权重).sum(axis=0)
+            # 平坦背景缺少对比度信息，增益回归1，主要用偏移校正以免放大噪声。
+            增益 = np.clip((协方差 + 1e-4) / (方差 + 1e-4), 0.9, 1.1)
+            偏移 = np.clip(目标均值 - 源均值 * 增益, -24.0 / 255.0, 24.0 / 255.0)
+
+        稳定区域 = (np.max(np.abs(目标 - (源 * 增益 + 偏移)), axis=1) < 0.035) & (结构权重 > 0.5)
+        if np.count_nonzero(稳定区域) < max(最少样本, len(源) * 0.6):
+            return 裁剪
+        混合强度 = min(float(强度), 1.0)
+        增益 = (1.0 + (增益 - 1.0) * 混合强度).astype(np.float32)
+        偏移 = (偏移 * 混合强度).astype(np.float32)
+        校正 = np.empty_like(裁剪)
+        for 起点 in range(0, 高, 256):
+            校正[起点:起点+256] = np.clip(裁剪[起点:起点+256] * 增益 + 偏移, 0.0, 1.0)
+        return 校正
+
+    def 恢复图像(self, 接缝, 裁剪图像, 遮罩扩展百分比, 遮罩羽化百分比, 裁剪遮罩=None, 背景图像=None, 颜色还原强度=0.0):
         # 添加RGB转换功能
         裁剪图像_rgb = self.image_to_rgb(裁剪图像)[0]
         if 背景图像 is not None:
@@ -713,9 +780,7 @@ class 孤海_裁剪恢复:
             if 未缩放裁剪遮罩 is not None:
                 # 将未缩放的裁剪遮罩缩放到原始裁剪尺寸
                 未缩放遮罩_np = np.array(未缩放裁剪遮罩).astype(np.float32) / 255.0
-                pil未缩放遮罩 = Image.fromarray((未缩放遮罩_np * 255).astype(np.uint8))
-                恢复遮罩_pil = pil未缩放遮罩.resize((原始裁剪宽, 原始裁剪高), Image.LANCZOS)
-                恢复遮罩_np = np.array(恢复遮罩_pil).astype(np.float32) / 255.0
+                恢复遮罩_np = self.缩放浮点遮罩(未缩放遮罩_np, 原始裁剪宽, 原始裁剪高)
             else:
                 # 如果没有保存未缩放的裁剪遮罩，使用原始方法
                 # 获取原始遮罩的对应区域
@@ -731,14 +796,38 @@ class 孤海_裁剪恢复:
 
                 # 缩放遮罩到恢复后的尺寸
                 if 遮罩区域.size > 0:
-                    pil遮罩 = Image.fromarray((遮罩区域 * 255).astype(np.uint8))
-                    恢复遮罩_pil = pil遮罩.resize((原始裁剪宽, 原始裁剪高), Image.LANCZOS)
-                    恢复遮罩_np = np.array(恢复遮罩_pil).astype(np.float32) / 255.0
+                    恢复遮罩_np = self.缩放浮点遮罩(遮罩区域, 原始裁剪宽, 原始裁剪高)
                 else:
                     恢复遮罩_np = np.zeros((原始裁剪高, 原始裁剪宽), dtype=np.float32)
 
-        # 应用遮罩扩展和羽化（使用优化后的OpenCV方法）
-        羽化遮罩 = self.创建羽化遮罩(恢复遮罩_np, 遮罩扩展, 遮罩羽化)
+        # 只在画布内计算羽化，画布外的黑色填充不应使贴边遮罩变灰。
+        有效左 = max(0, -裁剪左侧)
+        有效上 = max(0, -裁剪顶部)
+        有效右 = min(原始裁剪宽, 原始宽 - 裁剪左侧)
+        有效下 = min(原始裁剪高, 原始高 - 裁剪顶部)
+        羽化遮罩 = np.zeros_like(恢复遮罩_np, dtype=np.float32)
+        if 有效右 > 有效左 and 有效下 > 有效上:
+            有效遮罩 = self.创建羽化遮罩(
+                恢复遮罩_np[有效上:有效下, 有效左:有效右], 遮罩扩展, 遮罩羽化
+            )
+            # 贴回区域之外没有处理后的图像可融合；在这些人工边界内
+            # 平滑降至0。与原图画布重合的边则无需额外淡出。
+            if 遮罩羽化 > 0:
+                for 轴, 低端, 高端 in (
+                    (0, 裁剪顶部 > 0, 裁剪底部 < 原始高),
+                    (1, 裁剪左侧 > 0, 裁剪右侧 < 原始宽),
+                ):
+                    长度 = 有效遮罩.shape[轴]
+                    位置 = np.arange(长度, dtype=np.float32)
+                    权重 = np.ones(长度, dtype=np.float32)
+                    if 低端:
+                        权重 = np.minimum(权重, 位置 / 遮罩羽化)
+                    if 高端:
+                        权重 = np.minimum(权重, (长度 - 1 - 位置) / 遮罩羽化)
+                    权重 = np.clip(权重, 0.0, 1.0)
+                    权重 = 权重**3 * (权重 * (权重 * 6.0 - 15.0) + 10.0)
+                    有效遮罩 *= 权重[:, None] if 轴 == 0 else 权重[None, :]
+            羽化遮罩[有效上:有效下, 有效左:有效右] = 有效遮罩
 
         # 确保遮罩是3通道的
         if 恢复后_np.ndim == 3:
@@ -766,11 +855,33 @@ class 孤海_裁剪恢复:
             # 提取对应的恢复图像区域
             恢复区域 = 恢复后_np[源y偏移:源y偏移+源高, 源x偏移:源x偏移+源宽]
 
+            if 颜色还原强度 > 0:
+                # 始终参考原图同位置区域，传入的替换背景不参与校色估计。
+                参考区域 = 原始图像[0, 粘贴y:粘贴y+源高, 粘贴x:粘贴x+源宽, :3].cpu().numpy()
+                恢复区域 = self.匹配裁剪颜色(恢复区域, 参考区域, 颜色还原强度)
+
             # 提取对应的遮罩区域
             遮罩区域 = 遮罩3d[源y偏移:源y偏移+源高, 源x偏移:源x偏移+源宽]
 
             # 使用遮罩进行融合
             融合区域 = 粘贴区域 * (1 - 遮罩区域) + 恢复区域 * 遮罩区域
+            if 遮罩羽化 > 0:
+                # PreviewImage/SaveImage直接截断到uint8，极小的高斯尾部也会
+                # 让整圈像素少一级灰度。在混合区加入不足1/255的确定性抖动，
+                # 分散量化台阶；限制在两张源图之间，避免产生亮边或改变底图。
+                横坐标 = np.arange(粘贴x, 粘贴x + 源宽, dtype=np.float64)[None, :]
+                for 行起点 in range(0, 源高, 128):
+                    行终点 = min(行起点 + 128, 源高)
+                    当前遮罩 = 遮罩区域[行起点:行终点]
+                    过渡区域 = (当前遮罩 > 0.0) & (当前遮罩 < 1.0)
+                    if not np.any(过渡区域):
+                        continue
+                    纵坐标 = np.arange(粘贴y + 行起点, 粘贴y + 行终点, dtype=np.float64)[:, None]
+                    抖动 = np.mod(52.9829189 * np.mod(横坐标 * 0.06711056 + 纵坐标 * 0.00583715, 1.0), 1.0)
+                    当前融合 = 融合区域[行起点:行终点]
+                    上限 = np.maximum(粘贴区域[行起点:行终点], 恢复区域[行起点:行终点])
+                    np.minimum(当前融合 + (抖动 / 255.0).astype(np.float32)[..., None], 上限,
+                               out=当前融合, where=过渡区域)
             结果[粘贴y:粘贴y+源高, 粘贴x:粘贴x+源宽] = 融合区域
 
         # 转换回tensor
