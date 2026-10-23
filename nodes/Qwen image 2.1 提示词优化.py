@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import importlib.util
 import json
 import platform
 import re
@@ -112,6 +113,8 @@ def _llama_dependency_status() -> dict[str, object]:
         reasons.append("当前未安装 llama-cpp-python")
     elif _version_tuple(installed_version) < _LLAMA_CPP_MIN_VERSION:
         reasons.append(f"当前 llama-cpp-python 版本：{installed_version}")
+    if importlib.util.find_spec("diskcache") is None:
+        reasons.append("缺少运行依赖：diskcache")
     return {
         **target,
         "installed_version": installed_version or None,
@@ -161,6 +164,7 @@ def _install_llama_cpp() -> dict[str, object]:
         "--no-deps",
         "--disable-pip-version-check",
         "--no-input",
+        "diskcache",
         wheel_url,
     ]
     completed = subprocess.run(
