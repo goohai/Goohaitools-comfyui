@@ -206,15 +206,9 @@ class 孤海_遮罩裁剪V2:
         遮罩_np = 遮罩[0].cpu().numpy()
 
         原始高, 原始宽 = 图像_np.shape[:2]
-        有效区域 = (遮罩_np > 0.1).astype(np.uint8)
-        if cv2.countNonZero(有效区域):
-            _, 连通标签, 连通统计, _ = cv2.connectedComponentsWithStats(有效区域, connectivity=8)
-            最大连通面积 = int(连通统计[1:, cv2.CC_STAT_AREA].max())
-            del 连通标签
-        else:
-            最大连通面积 = 0
+        纯白像素总数 = np.count_nonzero(遮罩_np == 1.0)
         # 在填孔和裁剪前替换，接缝中保存的原始遮罩也必须是这张全白遮罩。
-        if 最大连通面积 < 原始高 * 原始宽 * 0.002:
+        if 纯白像素总数 < 10:
             遮罩 = torch.ones((1, 原始高, 原始宽), dtype=遮罩.dtype, device=遮罩.device)
             遮罩_np = 遮罩[0].cpu().numpy()
 
