@@ -3,10 +3,54 @@ import numpy as np
 from PIL import Image, ImageColor, ImageFilter
 import math
 
+
+def _创建外补遮罩(遮罩, 扩展信息, 原尺寸, 羽化):
+    """原始遮罩随图像缩放、裁剪和放置，外扩区域为白色。"""
+    原宽, 原高 = 原尺寸
+    目标宽, 目标高 = 扩展信息["目标宽"], 扩展信息["目标高"]
+    缩放宽, 缩放高 = 扩展信息["缩放宽"], 扩展信息["缩放高"]
+    if 遮罩 is None:
+        原遮罩 = torch.zeros((1, 原高, 原宽), dtype=torch.float32)
+    else:
+        原遮罩 = 遮罩.detach().to(device="cpu", dtype=torch.float32)
+        if 原遮罩.ndim == 2:
+            原遮罩 = 原遮罩.unsqueeze(0)
+        if 原遮罩.shape[-2:] != (原高, 原宽):
+            原遮罩 = torch.nn.functional.interpolate(
+                原遮罩.unsqueeze(1), size=(原高, 原宽),
+                mode="bilinear", align_corners=False
+            ).squeeze(1)
+    if (缩放高, 缩放宽) != (原高, 原宽):
+        原遮罩 = torch.nn.functional.interpolate(
+            原遮罩.unsqueeze(1), size=(缩放高, 缩放宽),
+            mode="bilinear", align_corners=False
+        ).squeeze(1)
+
+    基础遮罩 = torch.ones((原遮罩.shape[0], 目标高, 目标宽), dtype=torch.float32)
+    左, 上 = 扩展信息["左"], 扩展信息["上"]
+    放置左, 放置上 = max(0, 左), max(0, 上)
+    图像左, 图像上 = max(0, -左), max(0, -上)
+    实际宽 = min(缩放宽 - 图像左, 目标宽 - 放置左)
+    实际高 = min(缩放高 - 图像上, 目标高 - 放置上)
+    基础遮罩[:, 放置上:放置上+实际高, 放置左:放置左+实际宽] = 原遮罩[
+        :, 图像上:图像上+实际高, 图像左:图像左+实际宽
+    ]
+    if 羽化 > 0:
+        基础遮罩 = torch.stack([
+            torch.from_numpy(np.array(
+                Image.fromarray((层.numpy() * 255).astype(np.uint8)).filter(
+                    ImageFilter.GaussianBlur(radius=羽化)
+                )
+            ).astype(np.float32) / 255.0)
+            for 层 in 基础遮罩
+        ])
+    return 基础遮罩
+
+
 class 孤海外补画板按目标宽高:
     """
     孤海-外补画板（按目标宽高）
-    根据目标宽度和高度进行外补，输出遮罩已反转黑白区域
+    根据目标宽度和高度进行外补，输出原始遮罩与外扩区域的组合
     """
     
     @classmethod
@@ -47,7 +91,7 @@ class 孤海外补画板按目标宽高:
         # 处理图像
         输出图像 = self._创建输出图像(图像, 扩展信息, 外补颜色)
         
-        # 处理遮罩（此处调用逻辑不变，但内部实现已反转）
+        # 处理遮罩
         输出遮罩 = self._创建输出遮罩(遮罩, 扩展信息, 原尺寸, 羽化)
         
         # 检查是否存在外补区域
@@ -162,63 +206,7 @@ class 孤海外补画板按目标宽高:
         return 结果
     
     def _创建输出遮罩(self, 遮罩, 扩展信息, 原尺寸, 羽化):
-        """创建输出遮罩逻辑（核心修改：反转黑白区域）"""
-        目标宽, 目标高 = 扩展信息["目标宽"], 扩展信息["目标高"]
-        原宽, 原高 = 原尺寸
-        
-
-        if 遮罩 is None:
-
-            # 反转后：原图区域=0.0（黑），外扩区域=1.0（白）
-            基础遮罩 = torch.ones((目标高, 目标宽), dtype=torch.float32)  # 先全白
-            放置左 = max(0, 扩展信息["左"])
-            放置上 = max(0, 扩展信息["上"])
-            实际宽 = min(扩展信息["缩放宽"], 目标宽 - 放置左)
-            实际高 = min(扩展信息["缩放高"], 目标高 - 放置上)
-            基础遮罩[放置上:放置上+实际高, 放置左:放置左+实际宽] = 0.0  # 原图区域设为黑
-        else:
-
-            # 反转后：输入遮罩区域取反（白→黑，黑→白），外扩区域=1.0（白）
-            基础遮罩 = torch.ones((目标高, 目标宽), dtype=torch.float32)  # 先全白（外扩区域默认白）
-            
-            # 调整输入遮罩尺寸到原始图像尺寸
-            if 遮罩.shape[1:3] != (原高, 原宽):
-                遮罩 = torch.nn.functional.interpolate(
-                    遮罩.unsqueeze(0).unsqueeze(0), 
-                    size=(原高, 原宽), 
-                    mode='bilinear', 
-                    align_corners=False
-                ).squeeze(0).squeeze(0)
-            
-            # 缩放遮罩到缩放宽高
-            if 扩展信息["缩放宽"] != 原宽 or 扩展信息["缩放高"] != 原高:
-                遮罩 = torch.nn.functional.interpolate(
-                    遮罩.unsqueeze(0).unsqueeze(0), 
-                    size=(扩展信息["缩放高"], 扩展信息["缩放宽"]), 
-                    mode='bilinear', 
-                    align_corners=False
-                ).squeeze(0).squeeze(0)
-            
-            # 计算放置位置
-            放置左 = max(0, 扩展信息["左"])
-            放置上 = max(0, 扩展信息["上"])
-            图像左 = max(0, -扩展信息["左"])
-            图像上 = max(0, -扩展信息["上"])
-            实际宽 = min(扩展信息["缩放宽"] - 图像左, 目标宽 - 放置左)
-            实际高 = min(扩展信息["缩放高"] - 图像上, 目标高 - 放置上)
-            
-            # 输入遮罩区域取反（1.0→0.0，0.5→0.5，0.0→1.0）
-            反转后遮罩 = 1.0 - 遮罩[图像上:图像上+实际高, 图像左:图像左+实际宽]
-            # 放置反转后的遮罩（原图区域变为反转后的颜色，外扩区域保持全白）
-            基础遮罩[放置上:放置上+实际高, 放置左:放置左+实际宽] = 反转后遮罩
-        
-        if 羽化 > 0:
-            遮罩数组 = (基础遮罩.numpy() * 255).astype(np.uint8)
-            图像遮罩 = Image.fromarray(遮罩数组)
-            图像遮罩 = 图像遮罩.filter(ImageFilter.GaussianBlur(radius=羽化))
-            基础遮罩 = torch.from_numpy(np.array(图像遮罩).astype(np.float32) / 255.0)
-        
-        return 基础遮罩.unsqueeze(0)
+        return _创建外补遮罩(遮罩, 扩展信息, 原尺寸, 羽化)
     
     def _检查外补(self, 扩展信息, 原尺寸):
         """检查是否存在外补区域（无修改）"""
@@ -384,47 +372,7 @@ class 孤海外补画板按比例:
         return 结果
     
     def _创建输出遮罩(self, 遮罩, 扩展信息, 原尺寸, 羽化):
-        """创建输出遮罩逻辑（已修正黑白反转）"""
-        目标宽, 目标高 = 扩展信息["目标宽"], 扩展信息["目标高"]
-        原宽, 原高 = 原尺寸
-        
-        # 创建基础遮罩
-        if 遮罩 is None:
-            # 没有输入遮罩：原图区域为黑色，外扩区域为白色（与原逻辑相反）
-            基础遮罩 = torch.ones((目标高, 目标宽), dtype=torch.float32)
-            基础遮罩[扩展信息["上"]:扩展信息["上"]+原高, 
-                    扩展信息["左"]:扩展信息["左"]+原宽] = 0.0
-        else:
-            # 有输入遮罩：保持原始遮罩的反转，外扩区域为白色（与原逻辑相反）
-            基础遮罩 = torch.ones((目标高, 目标宽), dtype=torch.float32)
-            
-            # 处理原始遮罩区域
-            if 遮罩.shape[1:3] != (原高, 原宽):
-                # 调整遮罩尺寸
-                遮罩 = torch.nn.functional.interpolate(
-                    遮罩.unsqueeze(0).unsqueeze(0), 
-                    size=(原高, 原宽), 
-                    mode='bilinear', 
-                    align_corners=False
-                ).squeeze(0).squeeze(0)
-            
-            # 反转原始遮罩
-            基础遮罩[扩展信息["上"]:扩展信息["上"]+原高, 
-                    扩展信息["左"]:扩展信息["左"]+原宽] = 1 - 遮罩
-        
-        # 应用羽化效果
-        if 羽化 > 0:
-            # 转换为PIL图像进行羽化处理
-            遮罩数组 = (基础遮罩.numpy() * 255).astype(np.uint8)
-            图像遮罩 = Image.fromarray(遮罩数组)
-            
-            # 应用高斯模糊实现羽化
-            图像遮罩 = 图像遮罩.filter(ImageFilter.GaussianBlur(radius=羽化))
-            
-            # 转换回tensor
-            基础遮罩 = torch.from_numpy(np.array(图像遮罩).astype(np.float32) / 255.0)
-        
-        return 基础遮罩.unsqueeze(0)
+        return _创建外补遮罩(遮罩, 扩展信息, 原尺寸, 羽化)
     
     def _检查外补(self, 扩展信息, 原尺寸):
         """检查是否存在外补区域"""
@@ -646,76 +594,7 @@ class 孤海外补画板按方向:
             return 结果
     
     def _创建输出遮罩(self, 遮罩, 扩展信息, 原尺寸, 羽化, 裁剪模式):
-        """创建输出遮罩逻辑"""
-        目标宽, 目标高 = 扩展信息["目标宽"], 扩展信息["目标高"]
-        原宽, 原高 = 原尺寸
-        
-        if 裁剪模式:
-            # 裁剪模式：直接裁剪原始遮罩或创建全白遮罩
-            if 遮罩 is None:
-                # 没有输入遮罩：创建全白遮罩
-                基础遮罩 = torch.ones((目标高, 目标宽), dtype=torch.float32)
-            else:
-                # 有输入遮罩：裁剪原始遮罩
-                左, 上 = 扩展信息["左"], 扩展信息["上"]
-                
-                # 如果左或上为负数，需要调整裁剪区域
-                裁剪左 = max(0, -左)
-                裁剪上 = max(0, -上)
-                
-                # 计算实际裁剪区域
-                实际宽 = min(目标宽, 遮罩.shape[2] - 裁剪左)
-                实际高 = min(目标高, 遮罩.shape[1] - 裁剪上)
-                
-                # 裁剪遮罩
-                基础遮罩 = 遮罩[裁剪上:裁剪上+实际高, 裁剪左:裁剪左+实际宽]
-                
-                # 如果需要调整大小
-                if 基础遮罩.shape[0] != 目标高 or 基础遮罩.shape[1] != 目标宽:
-                    基础遮罩 = torch.nn.functional.interpolate(
-                        基础遮罩.unsqueeze(0).unsqueeze(0), 
-                        size=(目标高, 目标宽), 
-                        mode='bilinear', 
-                        align_corners=False
-                    ).squeeze(0).squeeze(0)
-        else:
-            # 扩展模式：创建基础遮罩
-            if 遮罩 is None:
-                # 没有输入遮罩：原图区域为黑色，外扩区域为白色
-                基础遮罩 = torch.ones((目标高, 目标宽), dtype=torch.float32)
-                基础遮罩[扩展信息["上"]:扩展信息["上"]+原高, 
-                        扩展信息["左"]:扩展信息["左"]+原宽] = 0.0
-            else:
-                # 有输入遮罩：保持原始遮罩的反转，外扩区域为白色
-                基础遮罩 = torch.ones((目标高, 目标宽), dtype=torch.float32)
-                
-                # 处理原始遮罩区域
-                if 遮罩.shape[1:3] != (原高, 原宽):
-                    # 调整遮罩尺寸
-                    遮罩 = torch.nn.functional.interpolate(
-                        遮罩.unsqueeze(0).unsqueeze(0), 
-                        size=(原高, 原宽), 
-                        mode='bilinear', 
-                        align_corners=False
-                    ).squeeze(0).squeeze(0)
-                
-                # 反转原始遮罩
-                基础遮罩[扩展信息["上"]:扩展信息["上"]+原高, 
-                        扩展信息["左"]:扩展信息["左"]+原宽] = 1 - 遮罩
-        
-        # 应用羽化效果
-        if 羽化 > 0:
-            # 转换为PIL图像进行羽化处理
-            遮罩数组 = (基础遮罩.numpy() * 255).astype(np.uint8)
-            图像遮罩 = Image.fromarray(遮罩数组)
-            
-            # 应用高斯模糊实现羽化
-            图像遮罩 = 图像遮罩.filter(ImageFilter.GaussianBlur(radius=羽化))
-            
-            # 转换回tensor
-            基础遮罩 = torch.from_numpy(np.array(图像遮罩).astype(np.float32) / 255.0)
-        
-        return 基础遮罩.unsqueeze(0)
+        return _创建外补遮罩(遮罩, 扩展信息, 原尺寸, 羽化)
     
     def _检查外补(self, 扩展信息, 原尺寸, 裁剪模式):
         """检查是否存在外补区域"""
