@@ -131,6 +131,8 @@ class 孤海外补画板可视化:
                                             mode="bilinear", align_corners=False).squeeze(1)
             indices = torch.arange(batch, device=图像.device).clamp(max=source_mask.shape[0] - 1)
             source_mask = source_mask[indices]
+            image[:, top:top + height, left:left + width] = torch.lerp(
+                图像, color, source_mask.clamp(0, 1).unsqueeze(-1))
         mask = 图像.new_ones((batch, height + top + bottom, width + left + right))
         mask[:, top:top + height, left:left + width] = source_mask
 
