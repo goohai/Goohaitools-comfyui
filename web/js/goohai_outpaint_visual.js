@@ -3,27 +3,55 @@ import { api } from "/scripts/api.js";
 
 const NODE_TYPE = "孤海外补画板可视化";
 const W = "gh_outpaint_visual";
-const RATIOS = ["自由比例", "1:1", "2:3", "3:2", "3:4", "4:3", "5:7", "9:16", "16:9", "21:9", "1:2", "2:1"];
+const RATIOS = ["自由比例", "原始比例", "1:1", "2:3", "3:2", "3:4", "4:3", "5:7", "9:16", "16:9", "21:9", "1:2", "2:1"];
 const SIDES = { left: "左", right: "右", top: "上", bottom: "下" };
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const loaderSubscriptions = new WeakMap();
+
+function limitCrops(values, iw, ih) {
+    const result = { ...values };
+    for (const [first, second, size] of [["left", "right", iw], ["top", "bottom", ih]]) {
+        const a = Math.max(0, -result[first]), b = Math.max(0, -result[second]);
+        const budget = size - Math.ceil(size * 0.1);
+        if (a + b > budget) {
+            const croppedFirst = Math.round(budget * a / (a + b));
+            if (a) result[first] = -croppedFirst;
+            if (b) result[second] = -(budget - croppedFirst);
+        }
+    }
+    return result;
+}
 
 function subscribeLoader(loader, notify) {
     if (!loader) return () => {};
     let subscription = loaderSubscriptions.get(loader);
     if (!subscription) {
         subscription = { listeners: new Set(), hooks: [] };
-        const widget = loader.widgets?.find((item) => ["image", "图像"].includes(item.name));
-        for (const [owner, key] of [[widget, "callback"], [loader, "onWidgetChanged"], [loader, "onConfigure"]]) {
+        const widgets = loader.widgets?.filter((item) => ["image", "图像", "image_type"].includes(item.name)) || [];
+        let pending = false;
+        const changed = () => {
+            if (pending) return;
+            pending = true;
+            queueMicrotask(() => {
+                pending = false;
+                for (const listener of subscription.listeners) listener();
+            });
+        };
+        for (const [owner, key] of [...widgets.map((widget) => [widget, "callback"]), [loader, "onWidgetChanged"], [loader, "onConfigure"], [loader, "onExecuted"]]) {
             if (!owner) continue;
             const original = owner[key];
             const wrapped = function () {
                 const result = original?.apply(this, arguments);
-                for (const listener of subscription.listeners) listener();
+                changed();
                 return result;
             };
             subscription.hooks.push({ owner, key, original, wrapped });
             owner[key] = wrapped;
+        }
+        const galleryRoot = loader.widgets?.find((item) => item.name === "ghil_browser")?.element;
+        if (galleryRoot) {
+            subscription.observer = new MutationObserver(changed);
+            subscription.observer.observe(galleryRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
         }
         loaderSubscriptions.set(loader, subscription);
     }
@@ -31,6 +59,7 @@ function subscribeLoader(loader, notify) {
     return () => {
         subscription.listeners.delete(notify);
         if (subscription.listeners.size) return;
+        subscription.observer?.disconnect();
         for (const { owner, key, original, wrapped } of subscription.hooks) {
             if (owner[key] === wrapped) owner[key] = original;
         }
@@ -58,6 +87,13 @@ function loaderInfo(node) {
     const origin = link != null ? app.graph?.getLink?.(link)?.origin_id : null;
     const upstream = origin != null ? app.graph?.getNodeById?.(origin) : null;
     if (!upstream) return null;
+    if (upstream.type === "GoohaiImageLibrary" || upstream.comfyClass === "GoohaiImageLibrary") {
+        const widget = upstream.widgets?.find((item) => item.name === "image");
+        const type = upstream.widgets?.find((item) => item.name === "image_type")?.value;
+        const value = widget?.value;
+        return { node: upstream, widget, key: `ghil|${type}|${value}`, url: null,
+            selection: type && type !== "无" && value ? new URLSearchParams({ type, image: value }) : null };
+    }
     const isLoader = ["LoadImage", "LoadImageGoohai", "LoadImageOutput"].includes(upstream.type)
         || ["LoadImage", "LoadImageGoohai", "LoadImageOutput"].includes(upstream.comfyClass);
     if (!isLoader) return null;
@@ -79,8 +115,19 @@ function loaderInfo(node) {
     };
 }
 
-function loaderFor(node) {
-    return loaderInfo(node)?.url || null;
+async function loaderFor(node) {
+    const info = loaderInfo(node);
+    if (!info?.selection) return info?.url || null;
+    const response = await api.fetchApi(`/ghil/selection?${info.selection}`);
+    const selected = await response.json();
+    if (!response.ok) throw new Error(selected.error || "读取图库图像失败");
+    if (selected.url) return api.apiURL(selected.url);
+    // Uploaded gallery images use the regular ComfyUI input image store.
+    let raw = info.widget.value.replaceAll("\\", "/");
+    const annotated = raw.match(/\s*\[(input|output|temp)\]\s*$/);
+    if (annotated) raw = raw.slice(0, annotated.index).trim();
+    const parts = raw.split("/");
+    return imageUrl(parts.pop(), annotated?.[1] || "input", parts.join("/"));
 }
 
 async function loadUpstreamPreview(node, receive, setStatus, signal) {
@@ -166,7 +213,7 @@ function setNumber(node, name, value) {
     const item = numberWidget(node, name);
     if (!item) return;
     const safe = Number.isFinite(Number(value)) ? Number(value) : 0;
-    item.widget.value = Math.max(0, Math.round(safe));
+    item.widget.value = Math.round(safe);
     item.widget.callback?.(item.widget.value);
 }
 
@@ -267,7 +314,7 @@ function createPreview(node) {
     function exactPads() {
         try {
             const data = JSON.parse(internalWidget("gh_visual_layout")?.value || "");
-            if (JSON.stringify(data.signature) === JSON.stringify(signature()) && data.pads?.length === 4 && data.pads.every((v) => Number.isFinite(v) && v >= 0)) {
+            if (JSON.stringify(data.signature) === JSON.stringify(signature()) && data.pads?.length === 4 && data.pads.every((v) => Number.isFinite(v))) {
                 return Object.fromEntries(Object.keys(SIDES).map((key, index) => [key, data.pads[index]]));
             }
         } catch (_) {}
@@ -287,27 +334,33 @@ function createPreview(node) {
                 rawWidget.callback?.(0);
             }
             state.values[key] = unit === "百分比"
-                ? Math.floor((key === "left" || key === "right" ? iw : ih) * raw / 100)
-                : raw;
+                ? Math.trunc((key === "left" || key === "right" ? iw : ih) * raw / 100)
+                : Math.trunc(raw);
             if (!Number.isFinite(state.values[key])) {
                 state.values[key] = 0;
                 setNumber(node, label, 0);
             }
         }
         Object.assign(state.values, exactPads() || {});
-        return state.values;
+        return translatedLayout() ? { ...state.values } : limitCrops(state.values, iw, ih);
+    }
+    function translatedLayout() {
+        try { return !!exactPads() && JSON.parse(internalWidget("gh_visual_layout").value).translated === true; }
+        catch (_) { return false; }
     }
     function constrain(values, iw, ih, edges = [], symmetric = false) {
         values = { ...values };
+        if (!edges.length && translatedLayout()) return values;
         if (symmetric) {
             for (const [start, end] of [["left", "right"], ["top", "bottom"]]) {
                 if (edges.includes(start)) values[end] = values[start];
                 else if (edges.includes(end)) values[start] = values[end];
             }
         }
+        values = limitCrops(values, iw, ih);
         const selected = internalWidget("gh_visual_ratio")?.value || "自由比例";
         if (!RATIOS.includes(selected) || selected === "自由比例") return { ...values };
-        let [rw, rh] = selected.split(":").map(Number);
+        let [rw, rh] = selected === "原始比例" ? [iw, ih] : selected.split(":").map(Number);
         const gcd = (a, b) => b ? gcd(b, a % b) : a;
         const divisor = gcd(rw, rh); rw /= divisor; rh /= divisor;
         const horizontal = edges.some((key) => key === "left" || key === "right");
@@ -315,33 +368,47 @@ function createPreview(node) {
         const widthFactor = (iw + values.left + values.right) / rw;
         const heightFactor = (ih + values.top + values.bottom) / rh;
         const desired = horizontal && !vertical ? widthFactor : vertical && !horizontal ? heightFactor : Math.max(widthFactor, heightFactor);
-        let factor = Math.ceil(Math.max(iw / rw, ih / rh, desired));
-        if (symmetric) {
+        const croppedW = iw + Math.min(0, values.left) + Math.min(0, values.right);
+        const croppedH = ih + Math.min(0, values.top) + Math.min(0, values.bottom);
+        const minimumW = edges.length ? Math.ceil(iw * 0.1)
+            + (horizontal && !symmetric ? Math.max(0, edges.includes("left") ? values.right : values.left) : 0) : croppedW;
+        const minimumH = edges.length ? Math.ceil(ih * 0.1)
+            + (vertical && !symmetric ? Math.max(0, edges.includes("top") ? values.bottom : values.top) : 0) : croppedH;
+        let factor = Math.max(minimumW / rw, minimumH / rh, desired);
+        if (selected !== "原始比例") factor = Math.ceil(factor);
+        if (symmetric && selected !== "原始比例") {
             // Prefer dimensions with even total padding, when integer pixels and
             // the selected ratio permit exact opposite-side equality.
             const evenPads = (value) => (value * rw - iw) % 2 === 0 && (value * rh - ih) % 2 === 0;
             if (!evenPads(factor) && evenPads(factor + 1)) factor += 1;
         }
         const result = { ...values };
-        for (const [start, end, total] of [["left", "right", factor * rw - iw], ["top", "bottom", factor * rh - ih]]) {
-            const sum = values[start] + values[end];
+        for (const [start, end, total, size] of [["left", "right", Math.round(factor * rw) - iw, iw], ["top", "bottom", Math.round(factor * rh) - ih, ih]]) {
+            const firstCrop = Math.min(0, values[start]), secondCrop = Math.min(0, values[end]);
+            const sum = Math.max(0, values[start]) + Math.max(0, values[end]);
             // Keep the opposite side fixed when only one side of an axis moves.
             let first = symmetric ? Math.floor(total / 2)
                 : edges.includes(start) && !edges.includes(end) ? total - values[end]
                 : edges.includes(end) && !edges.includes(start) ? values[start]
-                : sum ? Math.round(total * values[start] / sum) : Math.floor(total / 2);
-            first = clamp(Math.round(first), 0, total);
+                : edges.length && total < values[start] + values[end] ? Math.round((total + values[start] - values[end]) / 2)
+                : sum ? firstCrop + Math.round((total - firstCrop - secondCrop) * Math.max(0, values[start]) / sum)
+                : firstCrop + Math.floor((total - firstCrop - secondCrop) / 2);
+            // A ratio drag may crop the other axis; keep its centre until the
+            // retained-source limit requires redistributing the two sides.
+            const budget = size - Math.ceil(size * 0.1);
+            first = edges.length ? clamp(Math.round(first), -budget, total + budget)
+                : clamp(Math.round(first), firstCrop, total - secondCrop);
             result[start] = first; result[end] = total - first;
         }
         return result;
     }
-    function writePads(values) {
+    function writePads(values, translated = false) {
         if (!state.image) return;
         state.writing = true;
         try {
             for (const [key, name] of Object.entries(SIDES)) setExtension(name, Math.round(values[key]), key === "left" || key === "right" ? state.image.naturalWidth : state.image.naturalHeight);
             const layout = internalWidget("gh_visual_layout");
-            if (layout) layout.value = JSON.stringify({ signature: signature(), pads: Object.keys(SIDES).map((key) => Math.max(0, Math.round(values[key]))) });
+            if (layout) layout.value = JSON.stringify({ signature: signature(), pads: Object.keys(SIDES).map((key) => Math.round(values[key])), translated });
         } finally { state.writing = false; }
         node.setDirtyCanvas?.(true, true);
     }
@@ -350,12 +417,16 @@ function createPreview(node) {
         state.fixedOutput = null;
         ratio.value = internalWidget("gh_visual_ratio")?.value || "自由比例";
         const symmetric = !!state.shiftKey && edges.length > 0;
-        if (ratio.value !== "自由比例" || symmetric) writePads(constrain(current(), state.image.naturalWidth, state.image.naturalHeight, edges, symmetric));
+        const values = current();
+        if (ratio.value !== "自由比例" || symmetric || Object.keys(SIDES).some((key) => values[key] !== state.values[key])) {
+            writePads(constrain(values, state.image.naturalWidth, state.image.naturalHeight, edges, symmetric), !edges.length && translatedLayout());
+        }
         draw();
     }
     ratio.addEventListener("pointerdown", (event) => event.stopPropagation());
     ratio.addEventListener("change", (event) => {
         event.stopPropagation();
+        if (translatedLayout()) writePads(current());
         internalWidget("gh_visual_ratio").value = ratio.value;
         node.properties ??= {}; node.properties.gh_visual_ratio = ratio.value;
         enforce();
@@ -375,7 +446,7 @@ function createPreview(node) {
         const maximum = numberWidget(node, "最大输出长边")?.value || 0;
         const multiple = numberWidget(node, "整除数")?.value || 0;
         let scale = maximum > 0 ? Math.min(1, maximum / Math.max(totalW, totalH)) : 1;
-        const horizontal = v.left + v.right > 0, vertical = v.top + v.bottom > 0;
+        const horizontal = v.left > 0 || v.right > 0, vertical = v.top > 0 || v.bottom > 0;
         if (multiple > 0 && horizontal !== vertical) {
             const base = horizontal ? totalH : totalW;
             let target = Math.max(multiple, Math.round(base * scale / multiple) * multiple);
@@ -390,9 +461,9 @@ function createPreview(node) {
         let outputW = scaledW, outputH = scaledH;
         if (multiple > 0) {
             const rounded = (total, original, start, end) => {
-                if (!v[start] && !v[end]) return !horizontal && !vertical
+                if (v[start] <= 0 && v[end] <= 0) return !horizontal && !vertical
                     ? Math.max(multiple, Math.floor(total / multiple) * multiple) : total;
-                const safe = Math.floor(v[start] * total / original) + Math.floor(v[end] * total / original);
+                const safe = Math.floor(Math.max(0, v[start]) * total / original) + Math.floor(Math.max(0, v[end]) * total / original);
                 return Math.max(multiple, Math.ceil((total - safe) / multiple) * multiple, Math.round(total / multiple) * multiple);
             };
             outputW = rounded(scaledW, totalW, "left", "right");
@@ -419,7 +490,8 @@ function createPreview(node) {
         const { totalW, totalH } = v;
         // Reserve 20% of the source size on each side by default.
         const fit = Math.min(rect.width / Math.max(1, iw * 1.4), rect.height / Math.max(1, ih * 1.4));
-        let maxScale = Math.min(1, Math.max(1, rect.width - 4) / Math.max(1, totalW), Math.max(1, rect.height - 4) / Math.max(1, totalH));
+        const outputFit = Math.min(Math.max(1, rect.width - 4) / Math.max(1, totalW), Math.max(1, rect.height - 4) / Math.max(1, totalH));
+        let maxScale = outputFit;
         let scale = Math.min(fit * state.zoom, maxScale);
         let x = (rect.width - totalW * scale) / 2, y = (rect.height - totalH * scale) / 2;
         if (state.sourceAnchor) {
@@ -440,11 +512,13 @@ function createPreview(node) {
             ({ x, y, scale } = state.moveOrigin.layout);
         } else if (state.fixedOutput && state.fixedOutput.totalW === totalW && state.fixedOutput.totalH === totalH) {
             const box = state.fixedOutput;
-            scale = Math.min(box.scale * Math.min(rect.width / box.width, rect.height / box.height), 1);
+            scale = Math.min(box.scale * Math.min(rect.width / box.width, rect.height / box.height), outputFit);
             x = box.cx * rect.width - totalW * scale / 2;
             y = box.cy * rect.height - totalH * scale / 2;
         }
         if (!state.moveOrigin) { x += (state.pan?.x || 0) * rect.width; y += (state.pan?.y || 0) * rect.height; }
+        x = clamp(x, 2, Math.max(2, rect.width - 2 - totalW * scale));
+        y = clamp(y, 2, Math.max(2, rect.height - 2 - totalH * scale));
         // Discard zoom above the visible fit limit so reversing the wheel acts immediately.
         state.zoom = Math.min(state.zoom, scale / fit);
         ctx.save();
@@ -457,7 +531,7 @@ function createPreview(node) {
         ctx.strokeStyle = "#4dd0e1"; ctx.lineWidth = 1.5;
         ctx.strokeRect(x, y, totalW * scale, totalH * scale);
         info.textContent = `${v.outputW} × ${v.outputH}`;
-        state.layout = { x, y, scale, fit, zoomLimit: Math.min(1, maxScale / fit), iw, ih, totalW, totalH, left: v.left, top: v.top };
+        state.layout = { x, y, scale, fit, zoomLimit: outputFit / fit, iw, ih, totalW, totalH, left: v.left, top: v.top };
         const candidate = state.pointer ? drawPointerGuide(ctx, rect) : null;
         drawExtensionValues(ctx, rect, candidate || { left: x, right: x + totalW * scale, top: y, bottom: y + totalH * scale });
         drawCenterAnchor(ctx, x + totalW * scale / 2, y + totalH * scale / 2, dpr);
@@ -483,7 +557,7 @@ function createPreview(node) {
         for (const [side, pixels] of Object.entries(values)) {
             const horizontal = side === "left" || side === "right";
             const value = Math.round(percent ? pixels * 100 / (horizontal ? p.iw : p.ih) : pixels);
-            if (value <= 0) continue;
+            if (value === 0) continue;
             const text = String(value), half = ctx.measureText(text).width / 2;
             let x = cx, y = cy;
             if (side === "left") x = bounds.left - 7 - half;
@@ -538,13 +612,13 @@ function createPreview(node) {
             return [horizontal ? (nearLeft ? "left" : "right") : null, vertical ? (nearTop ? "top" : "bottom") : null].filter(Boolean);
         }
         if (boundaryOnly) return [];
-        // Any point in an outpaint strip is actionable.  This makes a click in
-        // the middle of a wide strip move that side directly to the click.
+        // Include both padding strips and the area outside the current output,
+        // even when that area still lies within the uncropped source image.
         const inferred = [];
-        if (point.x < p.left) inferred.push("left");
-        if (point.x > p.left + p.iw) inferred.push("right");
-        if (point.y < p.top) inferred.push("top");
-        if (point.y > p.top + p.ih) inferred.push("bottom");
+        if (point.x < Math.max(0, p.left)) inferred.push("left");
+        if (point.x > Math.min(p.totalW, p.left + p.iw)) inferred.push("right");
+        if (point.y < Math.max(0, p.top)) inferred.push("top");
+        if (point.y > Math.min(p.totalH, p.top + p.ih)) inferred.push("bottom");
         return inferred;
     }
     function drawPointerGuide(ctx, rect) {
@@ -575,16 +649,14 @@ function createPreview(node) {
         const sourceTop = p.y + p.top * p.scale;
         const sourceRight = sourceLeft + p.iw * p.scale;
         const sourceBottom = sourceTop + p.ih * p.scale;
-        let left = edges.includes("left") ? Math.min(px, sourceLeft) : p.x;
-        let right = edges.includes("right") ? Math.max(px, sourceRight) : p.x + p.totalW * p.scale;
-        let top = edges.includes("top") ? Math.min(py, sourceTop) : p.y;
-        let bottom = edges.includes("bottom") ? Math.max(py, sourceBottom) : p.y + p.totalH * p.scale;
-        if (ratio.value !== "自由比例" || state.shiftKey) {
-            const candidate = constrain({ left: Math.round((sourceLeft - left) / p.scale), right: Math.round((right - sourceRight) / p.scale),
-                top: Math.round((sourceTop - top) / p.scale), bottom: Math.round((bottom - sourceBottom) / p.scale) }, p.iw, p.ih, edges, state.shiftKey);
-            left = sourceLeft - candidate.left * p.scale; right = sourceRight + candidate.right * p.scale;
-            top = sourceTop - candidate.top * p.scale; bottom = sourceBottom + candidate.bottom * p.scale;
-        }
+        let left = edges.includes("left") ? px : p.x;
+        let right = edges.includes("right") ? px : p.x + p.totalW * p.scale;
+        let top = edges.includes("top") ? py : p.y;
+        let bottom = edges.includes("bottom") ? py : p.y + p.totalH * p.scale;
+        const candidate = constrain({ left: Math.round((sourceLeft - left) / p.scale), right: Math.round((right - sourceRight) / p.scale),
+            top: Math.round((sourceTop - top) / p.scale), bottom: Math.round((bottom - sourceBottom) / p.scale) }, p.iw, p.ih, edges, state.shiftKey);
+        left = sourceLeft - candidate.left * p.scale; right = sourceRight + candidate.right * p.scale;
+        top = sourceTop - candidate.top * p.scale; bottom = sourceBottom + candidate.bottom * p.scale;
         ctx.save();
         ctx.strokeStyle = "#4dd0e1"; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
         ctx.strokeRect(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
@@ -601,18 +673,67 @@ function createPreview(node) {
             // never feed back into widget values while the pointer is still.
             const dx = (event.clientX - origin.x) / origin.scale;
             const dy = (event.clientY - origin.y) / origin.scale;
-            if (edges.includes("left")) values.left = Math.max(0, Math.round(origin.values.left - dx));
-            if (edges.includes("right")) values.right = Math.max(0, Math.round(origin.values.right + dx));
-            if (edges.includes("top")) values.top = Math.max(0, Math.round(origin.values.top - dy));
-            if (edges.includes("bottom")) values.bottom = Math.max(0, Math.round(origin.values.bottom + dy));
+            if (edges.includes("left")) values.left = Math.round(origin.values.left - dx);
+            if (edges.includes("right")) values.right = Math.round(origin.values.right + dx);
+            if (edges.includes("top")) values.top = Math.round(origin.values.top - dy);
+            if (edges.includes("bottom")) values.bottom = Math.round(origin.values.bottom + dy);
         } else {
-            if (edges.includes("left")) values.left = Math.max(0, Math.round(p.left - point.x));
-            if (edges.includes("right")) values.right = Math.max(0, Math.round(point.x - p.left - p.iw));
-            if (edges.includes("top")) values.top = Math.max(0, Math.round(p.top - point.y));
-            if (edges.includes("bottom")) values.bottom = Math.max(0, Math.round(point.y - p.top - p.ih));
+            if (edges.includes("left")) values.left = Math.round(p.left - point.x);
+            if (edges.includes("right")) values.right = Math.round(point.x - p.left - p.iw);
+            if (edges.includes("top")) values.top = Math.round(p.top - point.y);
+            if (edges.includes("bottom")) values.bottom = Math.round(point.y - p.top - p.ih);
         }
-        writePads(constrain(values, p.iw, p.ih, edges, event.shiftKey ?? state.shiftKey));
+        writePads(snapDraggedPads(values, p, edges, event.shiftKey ?? state.shiftKey));
         draw(); node.setDirtyCanvas?.(true, true);
+    }
+    function snapDraggedPads(values, p, edges, symmetric) {
+        const result = constrain(values, p.iw, p.ih, edges, symmetric);
+        const scale = state.dragOrigin?.scale || p.scale;
+        const initial = state.dragOrigin?.values || current();
+        const selected = internalWidget("gh_visual_ratio")?.value;
+        if (!RATIOS.includes(selected) || selected === "自由比例") {
+            const snapped = new Set();
+            for (const side of edges) {
+                const threshold = state.snappedSides?.has(side) ? 14 : 6;
+                if (Math.abs(result[side]) * scale <= threshold) {
+                    values[side] = 0; snapped.add(side);
+                }
+            }
+            state.snappedSides = snapped;
+            return constrain(values, p.iw, p.ih, edges, symmetric);
+        }
+        const candidates = Object.keys(SIDES).filter((side) => result[side] !== initial[side] || state.snappedSides?.has(side));
+        candidates.sort((a, b) => Number(state.snappedSides?.has(b)) - Number(state.snappedSides?.has(a))
+            || Math.abs(result[a]) - Math.abs(result[b]));
+        for (const side of candidates) {
+            if (Math.abs(result[side]) * scale > (state.snappedSides?.has(side) ? 14 : 6)) continue;
+            // Find the drag position that puts this edge exactly on the source.
+            // Testing the same ratio constraint also covers indirectly moving edges.
+            const at = (delta) => {
+                const adjusted = { ...values };
+                for (const edge of edges) adjusted[edge] += delta;
+                return constrain(adjusted, p.iw, p.ih, edges, symmetric);
+            };
+            let low = -Math.max(p.iw, p.ih), high = Math.max(p.iw, p.ih);
+            if (at(low)[side] > 0 || at(high)[side] < 0) continue;
+            for (let i = 0; i < 24; i++) {
+                const mid = (low + high) / 2;
+                if (at(mid)[side] < 0) low = mid;
+                else high = mid;
+            }
+            const nearby = Object.keys(SIDES).filter((key) => Math.abs(result[key]) * scale <= 6);
+            const score = (pads) => nearby.reduce((sum, key) => sum + Math.abs(pads[key]), 0);
+            let snapped = at(high);
+            for (const offset of [0.5, 1, 1.5, 2]) {
+                const alternative = at(high + offset);
+                if (alternative[side] === 0 && score(alternative) < score(snapped)) snapped = alternative;
+            }
+            if (snapped[side] !== 0) continue;
+            state.snappedSides = new Set([side]);
+            return snapped;
+        }
+        state.snappedSides = null;
+        return result;
     }
     viewport.addEventListener("pointerdown", (event) => {
         if (event.button !== 0 || !state.layout) return;
@@ -620,7 +741,7 @@ function createPreview(node) {
         const point = pointInLayout(event), layout = state.layout;
         const onImage = point.x >= Math.max(0, layout.left) && point.x <= Math.min(layout.totalW, layout.left + layout.iw)
             && point.y >= Math.max(0, layout.top) && point.y <= Math.min(layout.totalH, layout.top + layout.ih);
-        if (onImage && !hitEdges(point, true).length && (layout.totalW > layout.iw || layout.totalH > layout.ih)) {
+        if (onImage && !hitEdges(point, true).length) {
             state.moveOrigin = { x: event.clientX, y: event.clientY, layout: { ...layout } };
             state.pointer = { clientX: event.clientX, clientY: event.clientY };
             viewport.setPointerCapture?.(event.pointerId);
@@ -637,6 +758,7 @@ function createPreview(node) {
         const boundary = hitEdges(pointInLayout(event), true);
         state.dragging = edges;
         state.dragOrigin = null;
+        state.snappedSides = null;
         state.pointer = { clientX: event.clientX, clientY: event.clientY };
         if (!boundary.length) updateFromPoint(event);
         state.dragOrigin = { x: event.clientX, y: event.clientY, scale: state.layout.scale, values: { ...current() } };
@@ -649,10 +771,19 @@ function createPreview(node) {
         state.pointer = { clientX: event.clientX, clientY: event.clientY };
         if (state.moveOrigin) {
             const origin = state.moveOrigin, p = origin.layout;
-            const horizontal = Math.max(0, p.totalW - p.iw), vertical = Math.max(0, p.totalH - p.ih);
-            const left = clamp(Math.round(p.left + (event.clientX - origin.x) / p.scale), 0, horizontal);
-            const top = clamp(Math.round(p.top + (event.clientY - origin.y) / p.scale), 0, vertical);
-            writePads({ left, right: horizontal - left, top, bottom: vertical - top });
+            const horizontal = p.totalW - p.iw, vertical = p.totalH - p.ih;
+            const snap = (axis, value, total) => {
+                const held = origin.snaps?.[axis];
+                const target = held != null && Math.abs(value - held) * p.scale <= 14 ? held
+                    : [0, total].sort((a, b) => Math.abs(value - a) - Math.abs(value - b))
+                        .find((edge) => Math.abs(value - edge) * p.scale <= 6);
+                origin.snaps ??= {};
+                origin.snaps[axis] = target;
+                return target ?? value;
+            };
+            const left = snap("x", Math.round(p.left + (event.clientX - origin.x) / p.scale), horizontal);
+            const top = snap("y", Math.round(p.top + (event.clientY - origin.y) / p.scale), vertical);
+            writePads({ left, right: horizontal - left, top, bottom: vertical - top }, true);
             draw();
             event.preventDefault(); event.stopPropagation();
         } else if (state.dragging) updateFromPoint(event);
@@ -670,10 +801,9 @@ function createPreview(node) {
     function movePreviewPan(event) {
         if (!state.panOrigin) return;
         const origin = state.panOrigin, p = origin.layout;
-        // The source stays inside the viewport; padding and pixels are unchanged.
-        const left = p.x + p.left * p.scale, top = p.y + p.top * p.scale;
-        const dx = clamp(event.clientX - origin.x, -left, origin.width - left - p.iw * p.scale);
-        const dy = clamp(event.clientY - origin.y, -top, origin.height - top - p.ih * p.scale);
+        // Keep the final output visible; cropped source pixels may lie outside.
+        const dx = clamp(event.clientX - origin.x, 2 - p.x, origin.width - 2 - p.x - p.totalW * p.scale);
+        const dy = clamp(event.clientY - origin.y, 2 - p.y, origin.height - 2 - p.y - p.totalH * p.scale);
         state.pan = { x: (origin.pan.x || 0) + dx / origin.width, y: (origin.pan.y || 0) + dy / origin.height };
         event.preventDefault(); event.stopImmediatePropagation(); draw();
     }
@@ -697,8 +827,8 @@ function createPreview(node) {
             width: rect.width, height: rect.height, scale: p.scale, totalW: p.totalW, totalH: p.totalH };
         state.moveOrigin = null;
     }
-    viewport.addEventListener("pointerup", () => { finishMove(); state.dragging = null; state.dragOrigin = null; draw(); });
-    viewport.addEventListener("pointercancel", () => { finishMove(); state.dragging = null; state.dragOrigin = null; state.pointer = null; viewport.style.cursor = "default"; draw(); });
+    viewport.addEventListener("pointerup", () => { finishMove(); state.dragging = null; state.dragOrigin = null; state.snappedSides = null; draw(); });
+    viewport.addEventListener("pointercancel", () => { finishMove(); state.dragging = null; state.dragOrigin = null; state.snappedSides = null; state.pointer = null; viewport.style.cursor = "default"; draw(); });
     viewport.addEventListener("pointerleave", () => { if (state.dragging || state.moveOrigin || state.panOrigin) return; state.pointer = null; viewport.style.cursor = "default"; draw(); });
     function shiftChanged(event) {
         if (event.key !== "Shift") return;
@@ -722,9 +852,10 @@ function createPreview(node) {
             event.preventDefault(); event.stopImmediatePropagation();
             if (!event.deltaY) return;
             state.fixedOutput = null;
+            state.sourceAnchor = null;
             const zoom = state.layout ? state.layout.scale / state.layout.fit : state.zoom;
             const limit = state.layout?.zoomLimit || 1;
-            state.zoom = clamp(zoom * (event.deltaY < 0 ? 1.1 : 0.9), limit * 0.25, limit);
+            state.zoom = clamp(zoom * (event.deltaY < 0 ? 1.1 : 0.9), Math.min(1, limit) * 0.25, limit);
             draw();
         } else if (event.type === "pointerdown") {
             if (!inside || event.button !== 1) return;
@@ -740,8 +871,14 @@ function createPreview(node) {
     load.addEventListener("click", async (event) => {
         event.stopPropagation();
         if (load.disabled) return;
-        const url = loaderFor(node);
-        if (url) { try { await setImage(url); } catch (error) { if (!state.disposed) info.textContent = error.message; } return; }
+        try {
+            const url = await loaderFor(node);
+            if (state.disposed) return;
+            if (url) { await setImage(url); return; }
+            if (loaderInfo(node)?.node?.comfyClass === "GoohaiImageLibrary" || loaderInfo(node)?.node?.type === "GoohaiImageLibrary") {
+                await setImage(null); return;
+            }
+        } catch (error) { if (!state.disposed) info.textContent = error.message; return; }
         load.disabled = true; info.textContent = "正在加载上游图像…";
         state.cancelPreview?.();
         const controller = new AbortController();
@@ -780,11 +917,22 @@ function createPreview(node) {
             img.src = src;
         });
     }
-    state.refresh = () => {
+    state.refresh = async () => {
         if (state.disposed) return;
-        const url = loaderFor(node) || state.upstreamPreviewUrl;
-        setImage(url).catch((error) => { if (!state.disposed) info.textContent = error.message; });
-        draw();
+        const request = state.refreshRequest = (state.refreshRequest || 0) + 1;
+        state.cancelImage?.();
+        state.imageRequest = (state.imageRequest || 0) + 1;
+        const loader = loaderInfo(node)?.node;
+        if (loader !== state.loaderNode) patchLoaderEvents(loader);
+        try {
+            const url = await loaderFor(node) || state.upstreamPreviewUrl;
+            if (state.disposed || request !== state.refreshRequest) return;
+            await setImage(url);
+        } catch (error) {
+            if (!state.disposed && request === state.refreshRequest) info.textContent = error.message;
+            return;
+        }
+        if (!state.disposed && request === state.refreshRequest) draw();
     };
     // The frontend exposes executing.detail as the node ID, not the raw server payload.
     const refreshOnExecution = (event) => {
@@ -804,7 +952,9 @@ function createPreview(node) {
     };
     function patchLoaderEvents(loader) {
         state.unsubscribeLoader?.();
-        state.unsubscribeLoader = subscribeLoader(loader, () => state.observeLoader(true));
+        state.loaderNode = loader;
+        state.unsubscribeLoader = subscribeLoader(loader, () => state.observeLoader(
+            loader.type !== "GoohaiImageLibrary" && loader.comfyClass !== "GoohaiImageLibrary"));
     }
     patchLoaderEvents(loaderInfo(node)?.node);
     const original = node.onConnectionsChange; node.onConnectionsChange = function (type, index) {

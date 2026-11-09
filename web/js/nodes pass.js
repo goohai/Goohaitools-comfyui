@@ -1,6 +1,32 @@
 import { app } from "../../../scripts/app.js";
 
 let _globalIgCounter = 0;
+const _graphChangeListeners = new WeakMap();
+
+function watchGraphChanges(graph, listener) {
+    let entry = _graphChangeListeners.get(graph);
+    if (!entry) {
+        const original = graph.change;
+        const listeners = new Set();
+        const wrapped = function () {
+            const result = original.apply(this, arguments);
+            listeners.forEach(callback => callback());
+            return result;
+        };
+        entry = { original, wrapped, listeners };
+        _graphChangeListeners.set(graph, entry);
+        graph.change = wrapped;
+    }
+    entry.listeners.add(listener);
+    return () => {
+        entry.listeners.delete(listener);
+        if (!entry.listeners.size && graph.change === entry.wrapped) {
+            graph.change = entry.original;
+            _graphChangeListeners.delete(graph);
+        }
+    };
+}
+
 
 app.registerExtension({
     name: "goohaitools.ignore_groups",
@@ -54,11 +80,8 @@ function buildIgnoreGroupsUI(node) {
     let activeSet = null;
     let nameColor = null;
     let igDisable = false;
-    let selfChanging = false;
-    let dirty         = true;
     let sortOrder     = "position";
     let colorFilter   = "none";
-    let prevVisibleTitles = new Set();
     let uiScale       = 1.0;
 
     if (node.properties) {
@@ -84,6 +107,7 @@ function buildIgnoreGroupsUI(node) {
         node.properties.guhai_ig_sort_order  = sortOrder;
         node.properties.guhai_ig_color_filter = colorFilter;
         node.properties.guhai_ig_ui_scale    = uiScale;
+        delete node.properties.guhai_ig_paused_groups;
     }
 
     function _guhaiSyncGroups() {
@@ -98,11 +122,9 @@ function buildIgnoreGroupsUI(node) {
         uiScale    = (node.properties && node.properties.guhai_ig_ui_scale)    || 1.0;
         lastSig = "";
         lastStateSig = "";
-        prevVisibleTitles = new Set();
-        _preserveActive = true;
         _lastAppliedScale = -1;
-        dirty = true;
         refresh(true);
+        scheduleStateSync();
     }
 
 
@@ -364,28 +386,9 @@ function buildIgnoreGroupsUI(node) {
         });
     }
 
-    function getAllNestedGroups(parentGroup) {
-        const all = rawGroups();
-        const result = [];
-        const visited = new Set();
-        visited.add(parentGroup.ref);
-        function findNested(parent) {
-            all.forEach(ag => {
-                if (!visited.has(ag.ref) && inside(ag.bounds, parent.bounds)) {
-                    visited.add(ag.ref);
-                    result.push(ag);
-                    findNested(ag);
-                }
-            });
-        }
-        findNested(parentGroup);
-        return result;
-    }
-
-
     function bypassGroup(grp, cachedAll) {
         collectNodes(grp, null, cachedAll).forEach(n => {
-            if (igDisable) { n.mode = 2; } else { n.mode = 4; }
+            n.mode = igDisable ? 2 : 4;
         });
     }
 
@@ -422,71 +425,22 @@ function buildIgnoreGroupsUI(node) {
     function syncExternalState(cachedAll) {
         if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return false;
 
+        const all = cachedAll || rawGroups();
         let changed = false;
-
         if (mode === "default") {
-            if (!Array.isArray(activeSet)) return false;
-            const allList = rawGroups();
-            allList.forEach(g => {
-                const gs = getGroupState(g, cachedAll);
-                const isActive = activeSet.includes(g.title);
-                if (gs === true && !isActive) {
-                    activeSet.push(g.title);
-                    changed = true;
-                } else if (gs === false && isActive) {
-                    activeSet = activeSet.filter(t => t !== g.title);
-                    changed = true;
-                }
-            });
+            const next = all.filter(g => getGroupState(g, all) !== false).map(g => g.title);
+            if (JSON.stringify(next) !== JSON.stringify(activeSet)) {
+                activeSet = next;
+                changed = true;
+            }
         } else {
-            const filteredList = visible(cachedAll);
-            if (mode === "always_one") {
-                if (active) {
-                    const grp = filteredList.find(g => g.title === active);
-                    if (grp && getGroupState(grp, cachedAll) === false) {
-                        const nextActive = filteredList.find(g => getGroupState(g, cachedAll) === true);
-                        active = nextActive ? nextActive.title : (filteredList.length ? filteredList[0].title : null);
-                        changed = true;
-                    } else if (!grp) {
-                        if (filteredList.length) {
-                            const firstActive = filteredList.find(g => getGroupState(g, cachedAll) === true);
-                            active = firstActive ? firstActive.title : filteredList[0].title;
-                        } else {
-                            active = null;
-                        }
-                        changed = true;
-                    }
-                }
-                if (!active && filteredList.length) {
-                    const firstActive = filteredList.find(g => getGroupState(g, cachedAll) === true);
-                    if (firstActive) {
-                        active = firstActive.title;
-                        changed = true;
-                    }
-                }
-            } else if (mode === "at_most_one") {
-                if (active) {
-                    const grp = filteredList.find(g => g.title === active);
-                    if (grp && getGroupState(grp, cachedAll) === false) {
-                        active = null;
-                        changed = true;
-                    } else if (!grp) {
-                        active = null;
-                        changed = true;
-                    }
-                }
-                if (!active) {
-                    for (const g of filteredList) {
-                        if (getGroupState(g, cachedAll) === true) {
-                            active = g.title;
-                            changed = true;
-                            break;
-                        }
-                    }
-                }
+            const onList = visible(all).filter(g => getGroupState(g, all) !== false);
+            const next = onList.some(g => g.title === active) ? active : (onList[0]?.title || null);
+            if (next !== active) {
+                active = next;
+                changed = true;
             }
         }
-
         if (changed) save();
         return changed;
     }
@@ -553,9 +507,7 @@ function buildIgnoreGroupsUI(node) {
         const list = visible();
         const effectiveColor = nameColor || "#a89961";
         let sig = list.map(g => {
-            const isOn = mode === "default"
-                ? (Array.isArray(activeSet) && activeSet.includes(g.title))
-                : g.title === active;
+            const isOn = getGroupState(g) !== false;
             return g.title + (isOn ? ":1" : ":0");
         }).join("\x00");
         sig += "|" + effectiveColor + "|" + (mode || "") + "|" + uiScale;
@@ -599,9 +551,7 @@ function buildIgnoreGroupsUI(node) {
             rootEl.style.height    = h + "px";
 
             list.forEach((g) => {
-                const isOn = mode === "default"
-                    ? activeSet.includes(g.title)
-                    : g.title === active;
+                const isOn = getGroupState(g) !== false;
 
                 const row = document.createElement("div");
                 row.className = "guhai-ig-row";
@@ -661,137 +611,44 @@ function buildIgnoreGroupsUI(node) {
 
     let lastSig = "";
     let lastStateSig = "";
-    let _preserveActive = false;
 
     function refresh(forceApply) {
-        /* ── 优化：整个刷新周期内只调用一次 rawGroups ── */
         const cachedAll = rawGroups(true);
-
         const list = visible(cachedAll);
-        const currentVisibleTitles = new Set(list.map(g => g.title));
-        const sig  = list.map(g => g.title).join("\x00");
-        const listChanged = (sig !== lastSig);
+        const sig = list.map(g => g.title).join("\x00");
+        const listChanged = sig !== lastSig;
         lastSig = sig;
+        const stateChanged = syncExternalState(cachedAll);
 
-        let stateChanged = false;
-
-        if (mode === "default") {
-            if (!Array.isArray(activeSet)) {
-                activeSet = [];
-                cachedAll.forEach(g => {
-                    const gs = getGroupState(g, cachedAll);
-                    if (gs !== false) {
-                        activeSet.push(g.title);
-                    }
-                });
-                stateChanged = true;
-            } else {
-                const allTitles = new Set(cachedAll.map(g => g.title));
-                const before = activeSet.length;
-                activeSet = activeSet.filter(t => allTitles.has(t));
-                if (activeSet.length !== before) stateChanged = true;
-
-                if (listChanged) {
-                    list.forEach(g => {
-                        if (!prevVisibleTitles.has(g.title)) {
-                            const gs = getGroupState(g, cachedAll);
-                            const idx = activeSet.indexOf(g.title);
-                            if (gs === true && idx < 0) {
-                                activeSet.push(g.title);
-                                stateChanged = true;
-                            } else if (gs === false && idx >= 0) {
-                                activeSet.splice(idx, 1);
-                                stateChanged = true;
-                            }
-                        }
-                    });
-                }
-            }
-        } else {
-            if (!_preserveActive) {
-                const hasFilter = !!(filter.trim() || (colorFilter && colorFilter !== "none"));
-
-                if (active && !cachedAll.some(g => g.title === active)) {
-                    active = (mode === "always_one" && list.length) ? list[0].title : null;
-                    stateChanged = true;
-                }
-
-                if (active && hasFilter) {
-                    const filteredTitles = new Set(list.map(g => g.title));
-                    if (!filteredTitles.has(active)) {
-                        if (mode === "always_one" && list.length) {
-                            active = list[0].title;
-                        } else {
-                            active = null;
-                        }
-                        stateChanged = true;
-                    }
-                }
-
-                if (mode === "always_one" && !active && list.length) {
-                    active = list[0].title;
-                    stateChanged = true;
-                }
-            }
-        }
-
-        _preserveActive = false;
-        if (stateChanged) save();
-
-        if (forceApply || stateChanged || listChanged) {
-            selfChanging = true;
-            try {
-                list.forEach(g => {
-                    const isOn = mode === "default"
-                        ? activeSet.includes(g.title)
-                        : g.title === active;
-                    if (isOn) restoreGroup(g, cachedAll);
-                    else      bypassGroup(g, cachedAll);
-                });
-                try { app.graph.change(); } catch (_) {}
-            } finally {
-                selfChanging = false;
-            }
-        }
-
-        prevVisibleTitles = currentVisibleTitles;
-
+        // 刷新只同步界面；节点状态只由明确的开关操作修改。
         updateDynamicStyles();
         buildDom(forceApply || stateChanged || listChanged);
     }
 
 
     function handleToggle(title) {
-        if (mode === "default") {
-            if (!Array.isArray(activeSet)) activeSet = [];
-            const list = visible();
-            const grp  = list.find(g => g.title === title);
-            const idx  = activeSet.indexOf(title);
-            const turnOn = idx < 0;
+        const cachedAll = rawGroups(true);
+        const list = visible(cachedAll);
+        const grp = list.find(g => g.title === title);
+        if (!grp) return;
+        const isOn = getGroupState(grp, cachedAll) !== false;
 
-            if (turnOn) {
-                if (!activeSet.includes(title)) activeSet.push(title);
-                if (grp) {
-                    getAllNestedGroups(grp).forEach(ng => {
-                        if (!activeSet.includes(ng.title)) activeSet.push(ng.title);
-                    });
-                }
-            } else {
-                const offSet = new Set();
-                offSet.add(title);
-                if (grp) {
-                    getAllNestedGroups(grp).forEach(ng => offSet.add(ng.title));
-                }
-                activeSet = activeSet.filter(t => !offSet.has(t));
-            }
-        } else if (mode === "always_one") {
-            if (active === title) return;
-            active = title;
+        if (isOn) {
+            if (mode === "always_one") return;
+            bypassGroup(grp, cachedAll);
         } else {
-            if (active === title) { active = null; }
-            else { active = title; }
+            if (mode !== "default") {
+                list.forEach(g => {
+                    if (g !== grp && getGroupState(g, cachedAll) !== false) {
+                        bypassGroup(g, cachedAll);
+                    }
+                });
+            }
+            restoreGroup(grp, cachedAll);
         }
+        syncExternalState(cachedAll);
         save();
+        try { app.graph.change(); } catch (_) {}
         refresh(true);
     }
 
@@ -863,7 +720,8 @@ function buildIgnoreGroupsUI(node) {
                 _needsNodeHeightRefresh = true;
             }
 
-            if (newMode !== mode) {
+            const modeChanged = newMode !== mode;
+            if (modeChanged) {
                 if (newMode === "default") {
                     activeSet = visible().map(g => g.title);
                 } else if (newMode === "always_one") {
@@ -896,7 +754,21 @@ function buildIgnoreGroupsUI(node) {
                     if (list.length) active = list[0].title;
                 }
             }
+            if (modeChanged && mode !== "default") {
+                const cachedAll = rawGroups(true);
+                const list = visible(cachedAll);
+                list.forEach(g => {
+                    if (g.title !== active && getGroupState(g, cachedAll) !== false) {
+                        bypassGroup(g, cachedAll);
+                    }
+                });
+                const selected = list.find(g => g.title === active);
+                if (selected && getGroupState(selected, cachedAll) === false) {
+                    restoreGroup(selected, cachedAll);
+                }
+            }
             save();
+            try { app.graph.change(); } catch (_) {}
             refresh(true);
         }
 
@@ -1158,82 +1030,98 @@ function buildIgnoreGroupsUI(node) {
     node._guhaiSyncGroups   = _guhaiSyncGroups;
 
 
-    if (app.graph && typeof app.graph.change === "function") {
-        const origGraphChange = app.graph.change;
-        app.graph.change = function () {
-            if (!selfChanging) dirty = true;
-            return origGraphChange.apply(this, arguments);
-        };
+    let syncTimer = null;
+    let subscribed = false;
+    let stopWatchingGraph = null;
+
+    function scheduleStateSync() {
+        if (!subscribed || document.hidden || syncTimer !== null) return;
+        // 仅由事件安排一次同步，同一批操作共用一个回调。
+        syncTimer = setTimeout(() => {
+            syncTimer = null;
+            if (!node.graph || document.hidden || node.graph !== app.graph) return;
+            const cachedAll = rawGroups(true);
+            const list = visible(cachedAll);
+            const sig = list.map(g => g.title).join("\x00");
+            const stateSig = computeStateSig(list, cachedAll);
+            const listChanged = sig !== lastSig;
+            const stateChanged = stateSig !== lastStateSig;
+            if (listChanged || stateChanged) {
+                lastStateSig = stateSig;
+                syncExternalState(cachedAll);
+                lastSig = sig;
+                updateDynamicStyles();
+                buildDom(true);
+            }
+        }, 30);
     }
 
     function onKeyDown(e) {
         if ((e.ctrlKey || e.metaKey) &&
             (e.key === "m" || e.key === "b" || e.key === "M" || e.key === "B")) {
-            setTimeout(() => { dirty = true; }, 100);
+            scheduleStateSync();
         }
     }
-    document.addEventListener("keydown", onKeyDown);
 
-
-    let pageVisible = !document.hidden;
-    function onVisibilityChange() {
-        const nowVisible = !document.hidden;
-        if (nowVisible && !pageVisible) { pageVisible = true; dirty = true; }
-        else { pageVisible = nowVisible; }
+    function subscribeStateSync() {
+        if (subscribed) return;
+        subscribed = true;
+        const graph = node.graph || app.graph;
+        if (graph && typeof graph.change === "function") {
+            stopWatchingGraph = watchGraphChanges(graph, scheduleStateSync);
+        }
+        document.addEventListener("keydown", onKeyDown, true);
+        // rgthree 等扩展可能只修改 mode 并重绘，在操作结束后读取最终状态。
+        document.addEventListener("pointerup", scheduleStateSync, true);
+        document.addEventListener("click", scheduleStateSync, true);
+        document.addEventListener("visibilitychange", scheduleStateSync);
+        scheduleStateSync();
     }
-    document.addEventListener("visibilitychange", onVisibilityChange);
 
-
-    /* ── 优化：重构轮询循环，dirty 为 false 时跳过昂贵的状态签名计算 ── */
-    const timer = setInterval(() => {
-        if (!node.graph) {
-            clearInterval(timer);
-            mountObserver.disconnect();
-            if (mountFrame !== null) cancelAnimationFrame(mountFrame);
-            document.removeEventListener("visibilitychange", onVisibilityChange);
-            document.removeEventListener("keydown", onKeyDown);
-            const s = document.getElementById(_styleId);
-            if (s) s.remove();
-            return;
+    function unsubscribeStateSync() {
+        subscribed = false;
+        if (syncTimer !== null) {
+            clearTimeout(syncTimer);
+            syncTimer = null;
         }
-
-        if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return;
-
-        if (!pageVisible) return;
-
-        if (dirty) {
-            dirty = false;
-            const cachedAll = rawGroups(true);
-            const list = visible(cachedAll);
-            const sig = list.map(g => g.title).join("\x00");
-            const listChanged = (sig !== lastSig);
-            const stateSig = computeStateSig(list, cachedAll);
-            const stateChanged = (stateSig !== lastStateSig);
-
-            if (listChanged || stateChanged) {
-                lastStateSig = stateSig;
-                selfChanging = true;
-                try {
-                    const syncChanged = syncExternalState(cachedAll);
-                    updateDynamicStyles();
-                    if (listChanged || syncChanged) {
-                        refresh(true);
-                    } else {
-                        buildDom(true);
-                    }
-                    try { app.graph.change(); } catch (_) {}
-                } finally {
-                    selfChanging = false;
-                }
-            }
+        stopWatchingGraph?.();
+        stopWatchingGraph = null;
+        document.removeEventListener("keydown", onKeyDown, true);
+        document.removeEventListener("pointerup", scheduleStateSync, true);
+        document.removeEventListener("click", scheduleStateSync, true);
+        document.removeEventListener("visibilitychange", scheduleStateSync);
+        mountObserver.disconnect();
+        if (mountFrame !== null) {
+            cancelAnimationFrame(mountFrame);
+            mountFrame = null;
         }
-    }, 500);
+        if (_settingsCleanup) _settingsCleanup();
+        document.getElementById(_styleId)?.remove();
+    }
+
+    const origAdded = node.onAdded;
+    node.onAdded = function () {
+        const result = origAdded?.apply(this, arguments);
+        mountObserver.observe(document.getElementById("graph-canvas-container") || document.body, {
+            childList: true,
+            subtree: true,
+        });
+        subscribeStateSync();
+        updateDynamicStyles();
+        scheduleDomMount();
+        return result;
+    };
+    const origRemoved = node.onRemoved;
+    node.onRemoved = function () {
+        unsubscribeStateSync();
+        return origRemoved?.apply(this, arguments);
+    };
+    subscribeStateSync();
 
 
     updateDynamicStyles();
     refresh(false);
     lastStateSig = computeStateSig(visible());
-    dirty = false;
 
     node.size = [calcWidth(), calcHeight()];
 

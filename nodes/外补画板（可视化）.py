@@ -11,6 +11,20 @@ def _nearest(value):
     return math.floor(value + 0.5)
 
 
+def _limit_crops(width, height, pads):
+    pads = list(pads)
+    for first, second, size in ((0, 1, width), (2, 3, height)):
+        a, b = max(0, -pads[first]), max(0, -pads[second])
+        budget = size - math.ceil(size * 0.1)
+        if a + b > budget:
+            cropped_first = _nearest(budget * a / (a + b))
+            if a:
+                pads[first] = -cropped_first
+            if b:
+                pads[second] = -(budget - cropped_first)
+    return pads
+
+
 def _output_geometry(width, height, pads, maximum, multiple):
     """与前端 outputGeometry 保持一致；有外补时仅裁剪外补区域。"""
     total_w = width + pads[0] + pads[1]
@@ -66,10 +80,10 @@ class 孤海外补画板可视化:
             "required": {
                 "图像": ("IMAGE",),
                 "单位": (["像素", "百分比"], {"default": "百分比"}),
-                "左": ("INT", {"default": 0, "min": 0, "max": 3000}),
-                "右": ("INT", {"default": 0, "min": 0, "max": 3000}),
-                "上": ("INT", {"default": 0, "min": 0, "max": 3000}),
-                "下": ("INT", {"default": 0, "min": 0, "max": 3000}),
+                "左": ("INT", {"default": 0, "min": -3000, "max": 3000}),
+                "右": ("INT", {"default": 0, "min": -3000, "max": 3000}),
+                "上": ("INT", {"default": 0, "min": -3000, "max": 3000}),
+                "下": ("INT", {"default": 0, "min": -3000, "max": 3000}),
                 "最大输出长边": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 128}),
                 "整除数": ([0, 8, 16, 32, 64], {"default": 0}),
                 "外补颜色": ("GHCOLOR", {"default": "#808080"}),
@@ -90,36 +104,52 @@ class 孤海外补画板可视化:
            遮罩=None, 外补颜色="#808080", gh_visual_ratio="自由比例", gh_visual_layout=""):
         batch, height, width, channels = 图像.shape
         raw = [左, 右, 上, 下]
-        pads = [max(0, int(value * (width if index < 2 else height) / 100)
-                    if 单位 == "百分比" else int(value))
+        translated = False
+        pads = [int(value * (width if index < 2 else height) / 100)
+                if 单位 == "百分比" else int(value)
                 for index, value in enumerate(raw)]
         try:
             layout = json.loads(gh_visual_layout)
             exact = layout["pads"]
             if (layout["signature"] == [width, height, 单位, *raw]
                     and len(exact) == 4
-                    and all(isinstance(v, (int, float)) and math.isfinite(v) and v >= 0 for v in exact)):
+                    and all(isinstance(v, (int, float)) and math.isfinite(v) for v in exact)):
                 pads = [_nearest(v) for v in exact]
+                translated = layout.get("translated") is True and width + pads[0] + pads[1] > 0 and height + pads[2] + pads[3] > 0
         except (ValueError, TypeError, KeyError):
             pass
+        if not translated:
+            pads = _limit_crops(width, height, pads)
         ratios = {"1:1", "2:3", "3:2", "3:4", "4:3", "5:7", "9:16", "16:9", "21:9", "1:2", "2:1"}
-        if gh_visual_ratio in ratios:
-            rw, rh = map(int, gh_visual_ratio.split(":"))
+        if not translated and (gh_visual_ratio in ratios or gh_visual_ratio == "原始比例"):
+            rw, rh = (width, height) if gh_visual_ratio == "原始比例" else map(int, gh_visual_ratio.split(":"))
             common = math.gcd(rw, rh)
             rw, rh = rw // common, rh // common
-            factor = math.ceil(max((width + pads[0] + pads[1]) / rw,
-                                   (height + pads[2] + pads[3]) / rh))
-            for start, end, total in ((0, 1, rw * factor - width), (2, 3, rh * factor - height)):
-                old_total = pads[start] + pads[end]
-                first = _nearest(total * pads[start] / old_total) if old_total else total // 2
+            factor = max((width + pads[0] + pads[1]) / rw,
+                         (height + pads[2] + pads[3]) / rh)
+            if gh_visual_ratio != "原始比例":
+                factor = math.ceil(factor)
+            for start, end, total in ((0, 1, _nearest(rw * factor) - width), (2, 3, _nearest(rh * factor) - height)):
+                first_crop, second_crop = min(0, pads[start]), min(0, pads[end])
+                old_total = max(0, pads[start]) + max(0, pads[end])
+                extra = total - first_crop - second_crop
+                first = first_crop + (_nearest(extra * max(0, pads[start]) / old_total) if old_total else extra // 2)
                 pads[start], pads[end] = first, total - first
 
-        geometry = _output_geometry(width, height, pads, 最大输出长边, 整除数)
+        total_w, total_h = width + pads[0] + pads[1], height + pads[2] + pads[3]
+        source_x = min(width, max(0, -pads[0]))
+        source_y = min(height, max(0, -pads[2]))
+        end_x = min(width, max(0, total_w - pads[0]))
+        end_y = min(height, max(0, total_h - pads[2]))
+        source_image = 图像[:, source_y:end_y, source_x:end_x]
+        cropped_h, cropped_w = source_image.shape[1:3]
+        left, top = min(total_w, max(0, pads[0])), min(total_h, max(0, pads[2]))
+        pads = [left, total_w - left - cropped_w, top, total_h - top - cropped_h]
+        geometry = _output_geometry(cropped_w, cropped_h, pads, 最大输出长边, 整除数)
         left, right, top, bottom = pads
         color = 图像.new_ones(channels)
         color[:min(3, channels)] = 图像.new_tensor(ImageColor.getrgb(外补颜色)[:min(3, channels)]) / 255
-        image = color.expand(batch, height + top + bottom, width + left + right, channels).clone()
-        image[:, top:top + height, left:left + width] = 图像
+        image = color.expand(batch, cropped_h + top + bottom, cropped_w + left + right, channels).clone()
         if 遮罩 is None:
             source_mask = 图像.new_zeros((batch, height, width))
         else:
@@ -131,10 +161,11 @@ class 孤海外补画板可视化:
                                             mode="bilinear", align_corners=False).squeeze(1)
             indices = torch.arange(batch, device=图像.device).clamp(max=source_mask.shape[0] - 1)
             source_mask = source_mask[indices]
-            image[:, top:top + height, left:left + width] = torch.lerp(
-                图像, color, source_mask.clamp(0, 1).unsqueeze(-1))
-        mask = 图像.new_ones((batch, height + top + bottom, width + left + right))
-        mask[:, top:top + height, left:left + width] = source_mask
+        source_mask = source_mask[:, source_y:end_y, source_x:end_x]
+        image[:, top:top + cropped_h, left:left + cropped_w] = (source_image if 遮罩 is None else torch.lerp(
+            source_image, color, source_mask.clamp(0, 1).unsqueeze(-1)))
+        mask = 图像.new_ones((batch, cropped_h + top + bottom, cropped_w + left + right))
+        mask[:, top:top + cropped_h, left:left + cropped_w] = source_mask
 
         size = (geometry["scaled_h"], geometry["scaled_w"])
         if image.shape[1:3] != size:
