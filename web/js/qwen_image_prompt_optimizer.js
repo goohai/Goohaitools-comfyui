@@ -279,6 +279,22 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== NODE_NAME) return;
         installQueueSeedHook();
+        const originalConfigureNode = nodeType.prototype.configure;
+        nodeType.prototype.configure = function (config) {
+            // Core may restore all declared image slots and reorder widget inputs.
+            // Keep the saved order before clipboard links reconnect by slot index.
+            const inputNames = config?.inputs?.map((input) => input.name);
+            const result = originalConfigureNode.apply(this, arguments);
+            if (inputNames) {
+                const inputs = new Map(this.inputs.map((input) => [input.name, input]));
+                this.inputs = [
+                    ...inputNames.map((name) => inputs.get(name)).filter(Boolean),
+                    ...this.inputs.filter((input) => !inputNames.includes(input.name) && !isImageInput(input)),
+                ];
+            }
+            return result;
+        };
+
         const originalCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             originalCreated?.apply(this, arguments);

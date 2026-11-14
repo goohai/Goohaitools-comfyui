@@ -83,6 +83,7 @@ function buildIgnoreGroupsUI(node) {
     let sortOrder     = "position";
     let colorFilter   = "none";
     let uiScale       = 1.0;
+    let childSelections = node.properties?.guhai_ig_child_selections || {};
 
     if (node.properties) {
         if (node.properties.guhai_ig_filter      != null) filter    = node.properties.guhai_ig_filter;
@@ -108,6 +109,7 @@ function buildIgnoreGroupsUI(node) {
         node.properties.guhai_ig_color_filter = colorFilter;
         node.properties.guhai_ig_ui_scale    = uiScale;
         delete node.properties.guhai_ig_paused_groups;
+        node.properties.guhai_ig_child_selections = childSelections;
     }
 
     function _guhaiSyncGroups() {
@@ -120,6 +122,7 @@ function buildIgnoreGroupsUI(node) {
         sortOrder  = (node.properties && node.properties.guhai_ig_sort_order)  || "position";
         colorFilter= (node.properties && node.properties.guhai_ig_color_filter)|| "none";
         uiScale    = (node.properties && node.properties.guhai_ig_ui_scale)    || 1.0;
+        childSelections = node.properties?.guhai_ig_child_selections || {};
         lastSig = "";
         lastStateSig = "";
         _lastAppliedScale = -1;
@@ -386,17 +389,61 @@ function buildIgnoreGroupsUI(node) {
         });
     }
 
+    function getChildSelections(grp, cachedAll) {
+        const selections = [];
+        for (const controller of app.graph._nodes) {
+            if (controller === node || !controller._guhaiSingleGroups) continue;
+            const selection = controller._guhaiSingleGroups(grp, cachedAll);
+            if (selection) selections.push({ controller, ...selection });
+        }
+        return selections;
+    }
+
     function bypassGroup(grp, cachedAll) {
+        // 只记住单选子控制器的选择，普通子组和散节点不保存状态。
+        const selections = getChildSelections(grp, cachedAll);
+        if (getGroupState(grp, cachedAll) !== false) {
+            childSelections["group:" + grp.title] = Object.fromEntries(
+                selections.map(s => [String(s.controller.id), s.active])
+            );
+        }
         collectNodes(grp, null, cachedAll).forEach(n => {
             n.mode = igDisable ? 2 : 4;
         });
     }
 
     function restoreGroup(grp, cachedAll) {
+        const key = "group:" + grp.title;
+        const saved = childSelections[key] || {};
+        const selections = getChildSelections(grp, cachedAll);
         collectNodes(grp, null, cachedAll).forEach(n => {
             n.mode = 0;
             if (n.flags) n.flags.disabled = false;
         });
+        for (const selection of selections) {
+            const id = String(selection.controller.id);
+            const requested = Object.hasOwn(saved, id) ? saved[id] : selection.active;
+            const selected = selection.groups.find(g => g.title === requested)
+                || (selection.mode === "always_one" ? selection.groups[0] : null);
+            for (const g of selection.groups) {
+                if (g === selected) continue;
+                collectNodes(g, null, cachedAll).forEach(n => {
+                    n.mode = selection.disable ? 2 : 4;
+                });
+            }
+        }
+        delete childSelections[key];
+    }
+
+    function singleGroupsIn(parent, cachedAll) {
+        if (mode !== "always_one" && mode !== "at_most_one") return null;
+        const groups = visible(cachedAll).filter(g =>
+            g.ref !== parent.ref && inside(g.bounds, parent.bounds)
+        );
+        if (!groups.length) return null;
+        const onList = groups.filter(g => getGroupState(g, cachedAll) !== false);
+        const selected = onList.find(g => g.title === active) || onList[0];
+        return { groups, mode, disable: igDisable, active: selected?.title || null };
     }
 
     function isNodeActive(n) {
@@ -633,7 +680,10 @@ function buildIgnoreGroupsUI(node) {
         if (!grp) return;
         const isOn = getGroupState(grp, cachedAll) !== false;
 
-        if (isOn) {
+        const onList = mode === "default" ? []
+            : list.filter(g => getGroupState(g, cachedAll) !== false);
+        // 外部操作导致多组同时开启时，点击任一组即可重新选中它。
+        if (isOn && (mode === "default" || onList.length === 1)) {
             if (mode === "always_one") return;
             bypassGroup(grp, cachedAll);
         } else {
@@ -1028,6 +1078,7 @@ function buildIgnoreGroupsUI(node) {
 
     node._guhaiShowSettings = showSettings;
     node._guhaiSyncGroups   = _guhaiSyncGroups;
+    node._guhaiSingleGroups = singleGroupsIn;
 
 
     let syncTimer = null;

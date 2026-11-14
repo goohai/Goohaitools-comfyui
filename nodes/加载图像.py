@@ -1,5 +1,7 @@
 ﻿import os
 import hashlib
+import json
+import math
 import folder_paths
 import numpy as np
 import torch
@@ -34,6 +36,7 @@ class LoadImageGoohai:
                     "label_on": "开",
                     "label_off": "关",
                 }),
+                "crop": ("STRING", {"default": "", "hidden": True, "socketless": True}),
             },
         }
 
@@ -146,7 +149,7 @@ class LoadImageGoohai:
         value = str(image).strip()
         return not value or value == "无"
 
-    def load_image(self, image, 保留透明通道=False):
+    def load_image(self, image, 保留透明通道=False, crop=""):
         if self._is_empty_selection(image):
             return (None, None, "")
         try:
@@ -308,10 +311,39 @@ class LoadImageGoohai:
             output_image = output_images[0]
             output_mask = output_masks[0]
 
+        bounds = self._crop_bounds(crop, image, w, h)
+        if bounds:
+            left, top, right, bottom = bounds
+            output_image = output_image[:, top:bottom, left:right, :].clone()
+            output_mask = output_mask[:, top:bottom, left:right].clone()
         return (output_image, output_mask, filename)
 
+    @staticmethod
+    def _crop_bounds(crop, image, width, height):
+        if not crop:
+            return None
+        try:
+            settings = json.loads(crop)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(settings, dict) or settings.get("image") != image:
+            return None
+        rect = settings.get("rect")
+        if not isinstance(rect, list) or len(rect) != 4 or not all(
+            isinstance(value, (int, float)) and math.isfinite(value) for value in rect
+        ):
+            return None
+        x, y, width_ratio, height_ratio = rect
+        if width_ratio <= 0 or height_ratio <= 0:
+            return None
+        left = min(width - 1, max(0, math.floor(x * width + .5)))
+        top = min(height - 1, max(0, math.floor(y * height + .5)))
+        right = min(width, max(left + 1, math.floor((x + width_ratio) * width + .5)))
+        bottom = min(height, max(top + 1, math.floor((y + height_ratio) * height + .5)))
+        return left, top, right, bottom
+
     @classmethod
-    def IS_CHANGED(cls, image, 保留透明通道=False):
+    def IS_CHANGED(cls, image, 保留透明通道=False, crop=""):
         if cls._is_empty_selection(image):
             return "empty"
         try:
@@ -321,6 +353,7 @@ class LoadImageGoohai:
         if not os.path.isfile(image_path):
             return "missing"
         m = hashlib.sha256()
+        m.update(str(crop).encode("utf-8"))
         try:
             with open(image_path, "rb") as f:
                 m.update(f.read())
@@ -329,7 +362,7 @@ class LoadImageGoohai:
         return m.hexdigest()
 
     @classmethod
-    def VALIDATE_INPUTS(cls, image, 保留透明通道=False):
+    def VALIDATE_INPUTS(cls, image, 保留透明通道=False, crop=""):
         return True
 
 

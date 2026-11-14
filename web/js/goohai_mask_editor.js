@@ -1,5 +1,7 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { attachCrop, cancelCrop, handleCropKey } from "../lib/image_crop.js";
+import { exportMaskImages, deflateBytes, pngChunk, writeU32 } from "../lib/mask_export.js";
 
 const MAX_EDIT_LONG_SIDE = 1536;
 const EXT_NAME = "goohaitools.load_image_mask_editor";
@@ -7,6 +9,246 @@ const pendingMaskSaves = new Set();
 const imageLoadCache = new Map();
 const editorImageCache = new Map();
 const colorPreviewCache = new Map();
+const loaderCrops = new Set();
+
+function cropWidget(node) {
+    return isLoadImageGoohaiNode(node) ? node.widgets?.find((widget) => widget.name === "crop") : null;
+}
+
+function savedCrop(node) {
+    try {
+        const value = JSON.parse(cropWidget(node)?.value || "null");
+        return value?.type === "input" && value?.image === findImageWidget(node)?.value && Array.isArray(value.rect)
+            && value.rect.length === 4 && value.rect.every(Number.isFinite)
+            && value.rect[2] > 0 && value.rect[3] > 0 ? value : null;
+    } catch { return null; }
+}
+
+function cropBounds(rect, width, height) {
+    const [x, y, w, h] = rect;
+    const left = clamp(Math.round(x * width), 0, width - 1);
+    const top = clamp(Math.round(y * height), 0, height - 1);
+    const right = clamp(Math.round((x + w) * width), left + 1, width);
+    const bottom = clamp(Math.round((y + h) * height), top + 1, height);
+    return { x: left, y: top, w: right - left, h: bottom - top };
+}
+
+function rebindCrop(node, value) {
+    const crop = savedCrop(node);
+    if (crop) cropWidget(node).value = JSON.stringify({ ...crop, image: value });
+}
+
+function cropNodeAtEvent(event) {
+    const host = event.target.closest?.("[data-node-id]");
+    if (host) return app.graph?.getNodeById?.(host.dataset.nodeId);
+    if (event.target !== app.canvas?.canvas) return null;
+    const point = app.canvas.convertEventToCanvasOffset(event);
+    return app.graph?.getNodeOnPos(point[0], point[1]);
+}
+
+function installLoaderCrop(node) {
+    const widget = cropWidget(node);
+    if (!widget || node._guhaiCrop) return;
+    widget.hidden = true;
+    widget.computeSize = () => [0, -4];
+    const root = document.createElement("div");
+    root.className = "guhai-loader-crop";
+    root.style.display = "none";
+    const action = document.createElement("div");
+    action.className = "guhai-image-action-row";
+    const dimensions = document.createElement("div");
+    dimensions.className = "guhai-image-preview-size";
+    let preview = new Image();
+    root.append(action, preview, dimensions);
+    document.body.append(root);
+    let source = null, displayed = null, key = null, selectedValue = null, canvasArea = null, sourceRevision = 0;
+    let disposed = false;
+    let editor;
+    const layout = () => {
+        if (!source || !preview.naturalWidth) return;
+        const width = parseFloat(root.style.width) || 1, height = parseFloat(root.style.height) || 1;
+        const inset = editor.editing ? 46 : 0;
+        const availableWidth = Math.max(1, width - inset - (inset ? 12 : 0));
+        const availableHeight = Math.max(1, height - 16 - (inset ? 32 : 0));
+        const scale = Math.min(availableWidth / preview.naturalWidth, availableHeight / preview.naturalHeight);
+        const w = preview.naturalWidth * scale, h = preview.naturalHeight * scale;
+        Object.assign(preview.style, { width: `${w}px`, height: `${h}px`,
+            left: `${inset + (availableWidth - w) / 2}px`, top: `${(height - 16 - h) / 2}px` });
+        dimensions.style.top = `${(height - 16 + h) / 2}px`;
+        editor.position();
+    };
+    const changed = () => {
+        node.setDirtyCanvas(true, true);
+        node.graph?.change?.();
+        controller.update();
+    };
+    editor = attachCrop({
+        root, box: root, widget,
+        ownsEvent: (event) => !window._guhaiActiveMaskEditor && cropNodeAtEvent(event) === node,
+        zoomCanvas: (event) => app.canvas.processMouseWheel(event),
+        getIdentity: () => ({ type: "input", image: findImageWidget(node)?.value }),
+        getPreview: () => preview,
+        replacePreview(next) {
+            if (next !== preview) {
+                next.style.cssText = preview.style.cssText;
+                preview.replaceWith(next);
+                preview = next;
+            }
+            if (!editor.editing) {
+                displayed = next;
+                node.imgs = [next];
+                node.imageIndex = null;
+                node.setDirtyCanvas(true, true);
+            }
+            dimensions.textContent = `${next.naturalWidth} × ${next.naturalHeight}`;
+        },
+        setDimensions: (w, h) => { dimensions.textContent = `${w} × ${h}`; },
+        layout, changed, manualSelection() {}, showError: (error) => console.error("Goohai crop:", error),
+    });
+    const controller = {
+        node, editor,
+        async setPreview(url) {
+            const revision = ++sourceRevision;
+            selectedValue = String(findImageWidget(node)?.value || "");
+            key = `${selectedValue}|${widget.value}`;
+            // This controller owns the complete load: mask composition,
+            // image decode and crop. Keep the displayed image until it finishes.
+            void editor.setSource(null);
+            try {
+                const image = await loadImage(await url);
+                const next = image.cloneNode();
+                await next.decode();
+                if (disposed || revision !== sourceRevision
+                    || key !== `${findImageWidget(node)?.value}|${widget.value}`) return;
+                source = next;
+                await editor.setSource(next);
+                if (revision !== sourceRevision) return;
+                layout();
+                controller.update();
+            } catch (error) {
+                if (!disposed && revision === sourceRevision) console.error("Goohai preview:", error);
+            }
+        },
+        update(reload = false) {
+            if (disposed || !node.graph || node.graph !== app.graph || node.flags?.collapsed) {
+                if (editor.editing) cancelCrop();
+                root.style.display = "none";
+                return;
+            }
+            const value = String(findImageWidget(node)?.value || "");
+            if (savedCrop(node) === null && widget.value) widget.value = "";
+            const currentKey = `${value}|${widget.value}`;
+            if (key !== currentKey || reload) {
+                const previousValue = selectedValue;
+                selectedValue = value;
+                key = currentKey;
+                if (isEmptyImageValue(value)) {
+                    sourceRevision++;
+                    source = null; displayed = null; void editor.setSource(null);
+                } else if (reload || previousValue !== value || !source) {
+                    if (!node._guhaiMaskSaving) void controller.setPreview(nodeHasMask(node)
+                        ? maskPreviewUrl(value, node.properties?.guhaiMaskOutputState)
+                        : imageUrlFromParts(parseImageValue(value)));
+                } else if (!editor.editing) {
+                    void controller.setPreview(source.src);
+                }
+            }
+            if (displayed && node.imgs?.[0] !== displayed) {
+                node.imgs = [displayed];
+                node.imageIndex = null;
+                node.setDirtyCanvas(true, true);
+            }
+            const host = document.querySelector(`[data-node-id="${CSS.escape(String(node.id))}"]`);
+            const main = host?.querySelector('img[data-testid="main-image"]');
+            let area = canvasArea;
+            const zoom = (app.canvas?.ds?.scale || 1);
+            if (main && main.getBoundingClientRect().width) {
+                area = main.getBoundingClientRect();
+                const oldLayers = main.parentElement.querySelectorAll('[data-guhai-nodes2-original], [data-guhai-nodes2-green], [data-guhai-nodes2-masked], [data-guhai-nodes2-color]');
+                oldLayers.forEach((layer) => layer.remove());
+                const image = displayed || source;
+                if (image) {
+                    const parent = main.parentElement;
+                    const layer = parent.querySelector('[data-guhai-crop-preview]');
+                    if (parent._guhaiCropPreviewSrc !== image.src) {
+                        parent._guhaiCropPreviewSrc = image.src;
+                        const next = image.cloneNode();
+                        next.dataset.guhaiCropPreview = "true";
+                        next.className = main.className;
+                        Object.assign(next.style, { position: "absolute", inset: "0", width: "100%", height: "100%",
+                            objectFit: "contain", pointerEvents: "none", zIndex: "4" });
+                        next.decode().then(() => {
+                            if (disposed || !parent.isConnected || parent._guhaiCropPreviewSrc !== next.src) return;
+                            next.style.visibility = editor.editing ? "hidden" : "visible";
+                            parent.style.position = "relative";
+                            const previous = parent.querySelector('[data-guhai-crop-preview]');
+                            if (previous) previous.replaceWith(next);
+                            else parent.append(next);
+                            main.style.opacity = "0";
+                        }).catch(() => {
+                            if (parent._guhaiCropPreviewSrc === next.src) parent._guhaiCropPreviewSrc = null;
+                        });
+                    }
+                    if (layer) {
+                        main.style.opacity = "0";
+                        layer.style.visibility = editor.editing ? "hidden" : "visible";
+                    }
+                }
+            } else if (globalThis.LiteGraph?.vueNodesMode) area = null;
+            if (!area || !source || isEmptyImageValue(value)) { root.style.display = "none"; return; }
+            Object.assign(root.style, { display: "block", left: `${area.left}px`, top: `${area.top}px`,
+                width: `${area.width / zoom}px`, height: `${area.height / zoom}px`,
+                transform: `scale(${zoom})`, zIndex: editor.editing ? "1000" : "0",
+                background: editor.editing ? (node.bgcolor || "#242833") : "transparent" });
+            layout();
+        },
+        captureCanvas() {
+            for (const candidate of node.widgets || []) {
+                if (candidate.name !== "$$canvas-image-preview" || candidate._guhaiCropDraw) continue;
+                const draw = candidate.drawWidget || candidate.draw;
+                if (typeof draw !== "function") continue;
+                const method = candidate.drawWidget ? "drawWidget" : "draw";
+                candidate[method] = function (ctx) {
+                    const transform = ctx.getTransform();
+                    const canvas = ctx.canvas, rect = canvas.getBoundingClientRect();
+                    const y = this.y ?? this.last_y ?? 0;
+                    const height = this.computedHeight ?? this.height ?? 220;
+                    canvasArea = { left: rect.left + (transform.e + transform.c * y) * rect.width / canvas.width,
+                        top: rect.top + (transform.f + transform.d * y) * rect.height / canvas.height,
+                        width: node.size[0] * transform.a * rect.width / canvas.width,
+                        height: height * transform.d * rect.height / canvas.height };
+                    return draw.apply(this, arguments);
+                };
+                candidate._guhaiCropDraw = true;
+            }
+        },
+        dispose() {
+            disposed = true; sourceRevision++; editor.dispose(); root.remove(); loaderCrops.delete(controller);
+        },
+    };
+    node._guhaiCrop = controller;
+    loaderCrops.add(controller);
+    const removed = node.onRemoved;
+    node.onRemoved = function () { controller.dispose(); return removed?.apply(this, arguments); };
+    controller.captureCanvas();
+    controller.update();
+}
+
+function installLoaderCropRefresh() {
+    if (window._guhaiLoaderCropRefresh) return;
+    const style = document.createElement("link");
+    style.rel = "stylesheet";
+    style.href = new URL("../lib/image_crop.css", import.meta.url).href;
+    document.head.append(style);
+    const refresh = () => {
+        for (const controller of loaderCrops) {
+            controller.captureCanvas();
+            controller.update();
+        }
+        window._guhaiLoaderCropRefresh = requestAnimationFrame(refresh);
+    };
+    window._guhaiLoaderCropRefresh = requestAnimationFrame(refresh);
+}
 
 function clamp(v, min, max) {
     return Math.max(min, Math.min(max, v));
@@ -54,61 +296,6 @@ function canvasToObjectUrl(canvas, type = "image/jpeg", quality = 0.88) {
             else resolve(URL.createObjectURL(blob));
         }, type, quality);
     });
-}
-
-const pngCrcTable = (() => {
-    const table = new Uint32Array(256);
-    for (let n = 0; n < 256; n++) {
-        let c = n;
-        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-        table[n] = c >>> 0;
-    }
-    return table;
-})();
-
-function pngCrc(bytes) {
-    let c = 0xffffffff;
-    for (const b of bytes) c = pngCrcTable[(c ^ b) & 0xff] ^ (c >>> 8);
-    return (c ^ 0xffffffff) >>> 0;
-}
-
-function writeU32(out, offset, value) {
-    out[offset] = (value >>> 24) & 0xff;
-    out[offset + 1] = (value >>> 16) & 0xff;
-    out[offset + 2] = (value >>> 8) & 0xff;
-    out[offset + 3] = value & 0xff;
-}
-
-function pngChunk(type, data = new Uint8Array()) {
-    const typeBytes = new TextEncoder().encode(type);
-    const out = new Uint8Array(12 + data.length);
-    writeU32(out, 0, data.length);
-    out.set(typeBytes, 4);
-    out.set(data, 8);
-    const crcInput = new Uint8Array(typeBytes.length + data.length);
-    crcInput.set(typeBytes, 0);
-    crcInput.set(data, typeBytes.length);
-    writeU32(out, 8 + data.length, pngCrc(crcInput));
-    return out;
-}
-
-function concatBytes(parts) {
-    const total = parts.reduce((sum, p) => sum + p.length, 0);
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const p of parts) {
-        out.set(p, offset);
-        offset += p.length;
-    }
-    return out;
-}
-
-async function deflateBytes(bytes) {
-    if (typeof CompressionStream !== "function") {
-        throw new Error("\u5f53\u524d\u6d4f\u89c8\u5668\u4e0d\u652f\u6301 PNG \u65e0\u9884\u4e58\u7f16\u7801");
-    }
-    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate"));
-    return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 async function inflateBytes(bytes) {
@@ -163,32 +350,6 @@ async function readColorLayersChunk(url) {
         offset += 12 + length;
     }
     return null;
-}
-
-async function rgbaToPngBlob(rgba, width, height, extraChunks = []) {
-    const stride = width * 4;
-    const raw = new Uint8Array((stride + 1) * height);
-    for (let y = 0; y < height; y++) {
-        const rawOffset = y * (stride + 1);
-        raw[rawOffset] = 0;
-        raw.set(rgba.subarray(y * stride, (y + 1) * stride), rawOffset + 1);
-    }
-    const ihdr = new Uint8Array(13);
-    writeU32(ihdr, 0, width);
-    writeU32(ihdr, 4, height);
-    ihdr[8] = 8;
-    ihdr[9] = 6;
-    ihdr[10] = 0;
-    ihdr[11] = 0;
-    ihdr[12] = 0;
-    const png = concatBytes([
-        new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
-        pngChunk("IHDR", ihdr),
-        ...extraChunks,
-        pngChunk("IDAT", await deflateBytes(raw)),
-        pngChunk("IEND"),
-    ]);
-    return new Blob([png], { type: "image/png" });
 }
 
 function parseImageValue(value) {
@@ -437,13 +598,14 @@ function injectStyles() {
 }
 
 class GoohaiMaskEditor {
-    constructor({ imageUrl, maskUrl, colorUrl = null, maskMode, preserveRgbUnderMask = false, outputState = null, onSave, onClose }) {
+    constructor({ imageUrl, maskUrl, colorUrl = null, maskMode, preserveRgbUnderMask = false, outputState = null, cropRect = null, onSave, onClose }) {
         injectStyles();
         this.imageUrl = imageUrl;
         this.maskUrl = maskUrl;
         this.colorUrl = colorUrl;
         this.maskMode = maskMode;
         this.preserveRgbUnderMask = preserveRgbUnderMask;
+        this.cropRect = cropRect;
         this.outputMode = outputState?.mode === "color" ? "color" : "original";
         this.outputColor = outputState?.color || "red";
         this.outputOpacity = clamp(Number(outputState?.opacity ?? 50), 0, 100);
@@ -677,7 +839,10 @@ class GoohaiMaskEditor {
         // Keyboard shortcuts are routed by installMaskEditorHotkey(). Keeping
         // a second window keydown listener here would apply Ctrl+Z twice.
         window.addEventListener("keyup", this._keyUp = (e) => this.keyUp(e), true);
-        window.addEventListener("resize", this._resize = () => this.redrawMarquee());
+        window.addEventListener("resize", this._resize = () => {
+            this.layoutCropViewport();
+            this.redrawMarquee();
+        });
     }
 
     async init() {
@@ -712,6 +877,7 @@ class GoohaiMaskEditor {
             this.maskModePaint = this.cloneCanvas(this.rawPaint);
             this.refreshMaskDisplay();
             this.dims.textContent = `${editW} \u00d7 ${editH}${this.natural.sf < 1 ? `  (\u539f\u56fe ${this.natural.w} \u00d7 ${this.natural.h})` : ""}`;
+            this.layoutCropViewport();
             this.frame.style.display = "inline-block";
             this.loading.style.display = "none";
             this.pushHistory();
@@ -721,6 +887,37 @@ class GoohaiMaskEditor {
             this.loading.className = "guhai-mask-error";
             this.loading.textContent = `\u56fe\u7247\u52a0\u8f7d\u5931\u8d25: ${err?.message || err}`;
         }
+    }
+
+    layoutCropViewport() {
+        if (!this.cropRect || !this.paint.width) return;
+        const natural = cropBounds(this.cropRect, this.natural.w, this.natural.h);
+        const sx = this.paint.width / this.natural.w, sy = this.paint.height / this.natural.h;
+        this.cropView = { x: natural.x * sx, y: natural.y * sy, w: natural.w * sx, h: natural.h * sy };
+        if (!this.cropViewport) {
+            this.cropViewport = document.createElement("div");
+            Object.assign(this.cropViewport.style, { position: "relative", overflow: "hidden" });
+            this.frame.insertBefore(this.cropViewport, this.img);
+            this.cropViewport.append(this.img, this.paint);
+        }
+        const view = this.cropView;
+        const scale = Math.min(1, innerWidth * .9 / view.w, (innerHeight - 110) / view.h);
+        Object.assign(this.cropViewport.style, { width: `${view.w * scale}px`, height: `${view.h * scale}px` });
+        for (const element of [this.img, this.paint]) {
+            Object.assign(element.style, { position: "absolute", inset: "auto", left: `${-view.x * scale}px`,
+                top: `${-view.y * scale}px`, width: `${this.paint.width * scale}px`,
+                height: `${this.paint.height * scale}px`, maxWidth: "none", maxHeight: "none" });
+        }
+        this.dims.textContent = `${natural.w} × ${natural.h}`;
+    }
+
+    withCropClip(ctx, draw) {
+        if (!this.cropView) { draw(); return; }
+        ctx.save();
+        const { x, y, w, h } = this.cropView;
+        ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+        draw();
+        ctx.restore();
     }
 
     buildBaseAlphaPaint(editW, editH) {
@@ -1271,9 +1468,12 @@ class GoohaiMaskEditor {
 
     canvasPos(e) {
         const r = this.paint.getBoundingClientRect();
+        const view = this.cropView || { x: 0, y: 0, w: this.paint.width, h: this.paint.height };
         return {
-            x: (e.clientX - r.left) * this.paint.width / r.width,
-            y: (e.clientY - r.top) * this.paint.height / r.height,
+            x: this.cropView ? clamp((e.clientX - r.left) * this.paint.width / r.width, view.x, view.x + view.w)
+                : (e.clientX - r.left) * this.paint.width / r.width,
+            y: this.cropView ? clamp((e.clientY - r.top) * this.paint.height / r.height, view.y, view.y + view.h)
+                : (e.clientY - r.top) * this.paint.height / r.height,
         };
     }
 
@@ -1324,6 +1524,10 @@ class GoohaiMaskEditor {
             this.panStart = { x: e.clientX, y: e.clientY, ox: this.offset.x, oy: this.offset.y };
             return;
         }
+        if (this.cropViewport) {
+            const bounds = this.cropViewport.getBoundingClientRect();
+            if (e.clientX < bounds.left || e.clientX >= bounds.right || e.clientY < bounds.top || e.clientY >= bounds.bottom) return;
+        }
         if (this.tool === "marquee") {
             this.marqueeDown(e);
             return;
@@ -1355,16 +1559,20 @@ class GoohaiMaskEditor {
         this.filledPaintValid = false;
         this.lastPos = this.canvasPos(e);
         const ctx = this.outputMode === "color" ? this.activeColorLayer().getContext("2d") : this.rawPaint.getContext("2d");
-        this.applyBrush(ctx);
-        ctx.beginPath();
-        ctx.arc(this.lastPos.x, this.lastPos.y, this.brushSize / 2, 0, Math.PI * 2);
-        ctx.fill();
+        this.withCropClip(ctx, () => {
+            this.applyBrush(ctx);
+            ctx.beginPath();
+            ctx.arc(this.lastPos.x, this.lastPos.y, this.brushSize / 2, 0, Math.PI * 2);
+            ctx.fill();
+        });
         if (this.drawingPreviewPaint) {
             const previewCtx = this.drawingPreviewPaint.getContext("2d");
-            this.applyBrush(previewCtx);
-            previewCtx.beginPath();
-            previewCtx.arc(this.lastPos.x, this.lastPos.y, this.brushSize / 2, 0, Math.PI * 2);
-            previewCtx.fill();
+            this.withCropClip(previewCtx, () => {
+                this.applyBrush(previewCtx);
+                previewCtx.beginPath();
+                previewCtx.arc(this.lastPos.x, this.lastPos.y, this.brushSize / 2, 0, Math.PI * 2);
+                previewCtx.fill();
+            });
         }
         this.refreshDrawingPreview();
     }
@@ -1404,18 +1612,22 @@ class GoohaiMaskEditor {
         const pos = this.canvasPos(e);
         const ctx = this.outputMode === "color" ? this.activeColorLayer().getContext("2d") : this.rawPaint.getContext("2d");
         this.filledPaintValid = false;
-        this.applyBrush(ctx);
-        ctx.beginPath();
-        ctx.moveTo(this.lastPos.x, this.lastPos.y);
-        ctx.lineTo(pos.x, pos.y);
-        ctx.stroke();
+        this.withCropClip(ctx, () => {
+            this.applyBrush(ctx);
+            ctx.beginPath();
+            ctx.moveTo(this.lastPos.x, this.lastPos.y);
+            ctx.lineTo(pos.x, pos.y);
+            ctx.stroke();
+        });
         if (this.drawingPreviewPaint) {
             const previewCtx = this.drawingPreviewPaint.getContext("2d");
-            this.applyBrush(previewCtx);
-            previewCtx.beginPath();
-            previewCtx.moveTo(this.lastPos.x, this.lastPos.y);
-            previewCtx.lineTo(pos.x, pos.y);
-            previewCtx.stroke();
+            this.withCropClip(previewCtx, () => {
+                this.applyBrush(previewCtx);
+                previewCtx.beginPath();
+                previewCtx.moveTo(this.lastPos.x, this.lastPos.y);
+                previewCtx.lineTo(pos.x, pos.y);
+                previewCtx.stroke();
+            });
         }
         this.lastPos = pos;
         this.refreshDrawingPreview();
@@ -1712,6 +1924,7 @@ class GoohaiMaskEditor {
             this.drawingPreviewRaf = 0;
         }
         this.drawingPreviewPaint = null;
+        if (this.cropRect) this.maskInverted = false;
         if (this.outputMode === "color" && this.colorLayers?.size) {
             for (const layer of this.colorLayers.values()) layer.getContext("2d").clearRect(0, 0, layer.width, layer.height);
             this.composeColorLayers();
@@ -1817,10 +2030,11 @@ class GoohaiMaskEditor {
             let dx = Math.round(pos.x - this.marqueeMove.start.x);
             let dy = Math.round(pos.y - this.marqueeMove.start.y);
             if (bbox) {
-                if (bbox.minX + dx < 0) dx = -bbox.minX;
-                if (bbox.minY + dy < 0) dy = -bbox.minY;
-                if (bbox.maxX + dx + 1 > this.paint.width) dx = this.paint.width - bbox.maxX - 1;
-                if (bbox.maxY + dy + 1 > this.paint.height) dy = this.paint.height - bbox.maxY - 1;
+                const view = this.cropView || { x: 0, y: 0, w: this.paint.width, h: this.paint.height };
+                if (bbox.minX + dx < view.x) dx = view.x - bbox.minX;
+                if (bbox.minY + dy < view.y) dy = view.y - bbox.minY;
+                if (bbox.maxX + dx + 1 > view.x + view.w) dx = view.x + view.w - bbox.maxX - 1;
+                if (bbox.maxY + dy + 1 > view.y + view.h) dy = view.y + view.h - bbox.maxY - 1;
             }
             this.marqueeMove.dx = dx;
             this.marqueeMove.dy = dy;
@@ -1855,7 +2069,9 @@ class GoohaiMaskEditor {
         if (this.marqueeAction === "move" && this.marqueeMove) {
             const ctx = this.shapeMask.getContext("2d");
             ctx.clearRect(0, 0, this.shapeMask.width, this.shapeMask.height);
-            ctx.drawImage(this.marqueeMove.snap, this.marqueeMove.dx || 0, this.marqueeMove.dy || 0);
+            this.withCropClip(ctx, () => {
+                ctx.drawImage(this.marqueeMove.snap, this.marqueeMove.dx || 0, this.marqueeMove.dy || 0);
+            });
             this.marqueeRects = this.marqueeMove.rects.map((r) => ({
                 x: r.x + (this.marqueeMove.dx || 0),
                 y: r.y + (this.marqueeMove.dy || 0),
@@ -1879,10 +2095,11 @@ class GoohaiMaskEditor {
     }
 
     clipRect(r) {
-        const x = clamp(r.x, 0, this.paint.width);
-        const y = clamp(r.y, 0, this.paint.height);
-        const x2 = clamp(r.x + r.w, 0, this.paint.width);
-        const y2 = clamp(r.y + r.h, 0, this.paint.height);
+        const view = this.cropView || { x: 0, y: 0, w: this.paint.width, h: this.paint.height };
+        const x = clamp(r.x, view.x, view.x + view.w);
+        const y = clamp(r.y, view.y, view.y + view.h);
+        const x2 = clamp(r.x + r.w, view.x, view.x + view.w);
+        const y2 = clamp(r.y + r.h, view.y, view.y + view.h);
         return { x, y, w: x2 - x, h: y2 - y };
     }
 
@@ -1890,6 +2107,10 @@ class GoohaiMaskEditor {
         const ctx = this.shapeMask.getContext("2d");
         ctx.save();
         ctx.globalCompositeOperation = subtract ? "destination-out" : "source-over";
+        if (this.cropView) {
+            const { x, y, w, h } = this.cropView;
+            ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+        }
         ctx.fillStyle = "#fff";
         ctx.fillRect(Math.round(r.x), Math.round(r.y), Math.round(r.w), Math.round(r.h));
         ctx.restore();
@@ -2041,6 +2262,12 @@ class GoohaiMaskEditor {
         if (!points.length) return;
         const phase = this.dashOffset % 8;
         ctx.save();
+        if (this.cropViewport) {
+            const bounds = this.cropViewport.getBoundingClientRect();
+            ctx.beginPath();
+            ctx.rect((bounds.left - sr.left) * dpr, (bounds.top - sr.top) * dpr, bounds.width * dpr, bounds.height * dpr);
+            ctx.clip();
+        }
         const mdx = this.marqueeMove?.edgeCache ? (this.marqueeMove.dx || 0) : 0;
         const mdy = this.marqueeMove?.edgeCache ? (this.marqueeMove.dy || 0) : 0;
         for (const [x, y] of points) {
@@ -2093,148 +2320,46 @@ class GoohaiMaskEditor {
             const natH = this.natural.h || savePaint.height;
             const loaderTag = this.preserveRgbUnderMask ? "" : "-goohai";
             const stateTag = `__ghm-${this.outputMode}-${this.outputColor}-${this.outputOpacity}-${this.autoFillHoles ? 1 : 0}-${this.maskInverted ? 1 : 0}${loaderTag}`;
-            const outputCanvas = document.createElement("canvas");
-            outputCanvas.width = natW;
-            outputCanvas.height = natH;
-            const outputCtx = outputCanvas.getContext("2d");
-            outputCtx.drawImage(sourceImage || editImage, 0, 0, natW, natH);
-             if (this.outputMode === "color" && this.outputOpacity > 0) {
-                 const colorLayer = document.createElement("canvas");
-                 colorLayer.width = natW;
-                 colorLayer.height = natH;
-                 const colorCtx = colorLayer.getContext("2d");
-                 colorCtx.imageSmoothingEnabled = false;
-                 colorCtx.drawImage(paint, 0, 0, natW, natH);
-                 const colorData = colorCtx.getImageData(0, 0, natW, natH);
-                 const factor = this.outputOpacity / 100;
-                 for (let i = 3; i < colorData.data.length; i += 4) colorData.data[i] = Math.round(colorData.data[i] * factor);
-                 colorCtx.putImageData(colorData, 0, 0);
-                 outputCtx.drawImage(colorLayer, 0, 0);
+            const outputState = {
+                mode: this.outputMode, color: this.outputColor, opacity: this.outputOpacity,
+                fill: this.autoFillHoles, inverted: this.maskInverted,
+            };
+            // Scale opacity on the editor-sized paint, before any full-size export.
+            if (outputState.mode === "color") {
+                const ctx = paint.getContext("2d");
+                const colors = ctx.getImageData(0, 0, paint.width, paint.height);
+                const factor = outputState.opacity / 100;
+                for (let i = 3; i < colors.data.length; i += 4) colors.data[i] = Math.round(colors.data[i] * factor);
+                ctx.putImageData(colors, 0, 0);
             }
-            const outputData = outputCtx.getImageData(0, 0, natW, natH);
-            const outputMask = document.createElement("canvas");
-            outputMask.width = natW;
-            outputMask.height = natH;
-            const outputMaskCtx = outputMask.getContext("2d");
-            outputMaskCtx.imageSmoothingEnabled = false;
-            outputMaskCtx.drawImage(savePaint, 0, 0, natW, natH);
-            const outputMaskData = outputMaskCtx.getImageData(0, 0, natW, natH).data;
-            // The official loader reads its mask from this PNG's alpha. The
-            // Goohai loader already reads the separate painted-masked file, so
-            // its painted-output can keep the complete RGBA composite without
-            // creating another image file.
-            // Store the effective (possibly hole-filled) mask in the existing
-            // output PNG alpha channel for both loaders. The source image is
-            // restored from the paired original file when it is read, so this
-            // does not require an additional mask file.
-            for (let i = 0; i < outputData.data.length; i += 4) {
-                if (outputMaskData[i + 3] > 5) outputData.data[i + 3] = 0;
-            }
-            const outputBlobTask = rgbaToPngBlob(outputData.data, natW, natH);
-            // The saved image remains the requested output. Only the editor
-            // preview gets the legacy green mask overlay in original mode.
-            if (this.outputMode === "original") {
-                const previewOverlay = outputCtx.createImageData(natW, natH);
-                for (let i = 0; i < outputMaskData.length; i += 4) {
-                    previewOverlay.data[i] = 42;
-                    previewOverlay.data[i + 1] = 210;
-                    previewOverlay.data[i + 2] = 112;
-                    previewOverlay.data[i + 3] = outputMaskData[i + 3] > 5 ? 128 : 0;
-                }
-                const previewLayer = document.createElement("canvas");
-                previewLayer.width = natW;
-                previewLayer.height = natH;
-                previewLayer.getContext("2d").putImageData(previewOverlay, 0, 0);
-                outputCtx.drawImage(previewLayer, 0, 0);
-            }
-            // Build the preview independently of the uploads. The legacy
-            // canvas can display it before the image widget is updated.
-            const previewTask = (async () => {
+            const preserveRgbUnderMask = this.preserveRgbUnderMask;
+            // Close the editor before starting full-size image work.
+            const exportTask = (async () => {
                 await nextFrame();
-                // Keep the node preview's original alpha. JPEG would turn
-                // transparent PNG pixels into a black background.
-                return await canvasToObjectUrl(outputCanvas, "image/png");
+                return exportMaskImages({
+                    source: sourceImage || editImage, paint, rawMask, savePaint,
+                    width: natW, height: natH, mode: outputState.mode, preserveRgbUnderMask,
+                    colorChunk: await colorChunkTask,
+                });
             })();
+            const previewTask = exportTask.then(({ preview }) => preview)
+                .then((blob) => URL.createObjectURL(blob));
             const task = (async () => {
-                await nextFrame();
                 const ts = Date.now();
-
-                const masked = document.createElement("canvas");
-                masked.width = natW;
-                masked.height = natH;
-                const mctx = masked.getContext("2d");
-                mctx.drawImage(sourceImage, 0, 0, natW, natH);
-                let officialMaskedBlob = null;
-                let maskedBlob = null;
-                const colorChunk = await colorChunkTask;
-                if (this.preserveRgbUnderMask) {
-                    const maskCanvas = document.createElement("canvas");
-                    maskCanvas.width = natW;
-                    maskCanvas.height = natH;
-                    const maskCtx = maskCanvas.getContext("2d");
-                    maskCtx.imageSmoothingEnabled = false;
-                    maskCtx.drawImage(rawMask, 0, 0, natW, natH);
-                    const imageData = mctx.getImageData(0, 0, natW, natH);
-                    const maskData = maskCtx.getImageData(0, 0, natW, natH).data;
-                    const rawData = rawMask.getContext("2d").getImageData(0, 0, rawMask.width, rawMask.height).data;
-                    const sx = rawMask.width / natW, sy = rawMask.height / natH;
-                    for (let i = 0; i < imageData.data.length; i += 4) {
-                        const originalAlpha = imageData.data[i + 3];
-                        if (originalAlpha < 250) {
-                            imageData.data[i] = 255;
-                            imageData.data[i + 1] = 255;
-                            imageData.data[i + 2] = 255;
-                        }
-                        if (maskData[i + 3] > 5) {
-                            imageData.data[i + 3] = 1;
-                            const x = (i / 4) % natW, y = Math.floor((i / 4) / natW);
-                            const ri = (Math.min(rawMask.height - 1, Math.floor(y * sy)) * rawMask.width + Math.min(rawMask.width - 1, Math.floor(x * sx))) * 4;
-                            imageData.data[i] = rawData[ri];
-                            imageData.data[i + 1] = rawData[ri + 1];
-                            imageData.data[i + 2] = rawData[ri + 2];
-                        }
-                    }
-                    officialMaskedBlob = await rgbaToPngBlob(imageData.data, natW, natH, colorChunk ? [colorChunk] : []);
-                } else {
-                    mctx.globalCompositeOperation = "destination-out";
-                    mctx.imageSmoothingEnabled = false;
-                    mctx.drawImage(rawMask, 0, 0, natW, natH);
-                    mctx.globalCompositeOperation = "source-over";
-                    // Preserve the per-pixel paint colors under the transparent
-                    // mask pixels. The alpha remains the mask, while RGB is
-                    // used to restore color layers when reopening the editor.
-                    const maskedData = mctx.getImageData(0, 0, natW, natH);
-                    const rawData = rawMask.getContext("2d").getImageData(0, 0, rawMask.width, rawMask.height).data;
-                    const sx = rawMask.width / natW, sy = rawMask.height / natH;
-                    for (let y = 0; y < natH; y++) for (let x = 0; x < natW; x++) {
-                        const oi = (y * natW + x) * 4;
-                        const ri = (Math.min(rawMask.height - 1, Math.floor(y * sy)) * rawMask.width + Math.min(rawMask.width - 1, Math.floor(x * sx))) * 4;
-                        if (rawData[ri + 3] > 5) {
-                            maskedData.data[oi] = rawData[ri];
-                            maskedData.data[oi + 1] = rawData[ri + 1];
-                            maskedData.data[oi + 2] = rawData[ri + 2];
-                            // Keep a non-zero alpha so browser PNG decoding
-                            // preserves the RGB color for editor reopening.
-                            // The loader still treats this as a masked pixel.
-                            maskedData.data[oi + 3] = 1;
-                        }
-                    }
-                    mctx.putImageData(maskedData, 0, 0);
-                    maskedBlob = await rgbaToPngBlob(maskedData.data, natW, natH, colorChunk ? [colorChunk] : []);
-                }
-
+                const originalUpload = uploadImageUrl(sourceUrl, `clipspace-painted-${ts}.png`).catch(async () => {
+                    const original = document.createElement("canvas");
+                    original.width = natW;
+                    original.height = natH;
+                    original.getContext("2d").drawImage(sourceImage, 0, 0, natW, natH);
+                    return uploadCanvas(original, `clipspace-painted-${ts}.png`);
+                });
+                originalUpload.catch(() => {});
+                const { files } = await exportTask;
+                const { maskedBlob, outputBlob } = await files;
                 const uploads = [
-                    uploadImageUrl(sourceUrl, `clipspace-painted-${ts}.png`).catch(async () => {
-                        const original = document.createElement("canvas");
-                        original.width = natW;
-                        original.height = natH;
-                        original.getContext("2d").drawImage(sourceImage, 0, 0, natW, natH);
-                        return uploadCanvas(original, `clipspace-painted-${ts}.png`);
-                    }),
-                    officialMaskedBlob
-                        ? uploadBlob(officialMaskedBlob, `clipspace-painted-masked-${ts}.png`, "clipspace")
-                        : uploadBlob(maskedBlob, `clipspace-painted-masked-${ts}.png`, "clipspace"),
-                    uploadBlob(await outputBlobTask, `clipspace-painted-output-${ts}${stateTag}.png`, "clipspace"),
+                    originalUpload,
+                    uploadBlob(maskedBlob, `clipspace-painted-masked-${ts}.png`, "clipspace"),
+                    uploadBlob(outputBlob, `clipspace-painted-output-${ts}${stateTag}.png`, "clipspace"),
                 ];
                 const [, uploadedMasked, uploadedOutput] = await Promise.all(uploads);
 
@@ -2243,13 +2368,7 @@ class GoohaiMaskEditor {
                 return {
                     value: uploadedPath,
                     previewTask,
-                    outputState: {
-                        mode: this.outputMode,
-                        color: this.outputColor,
-                        opacity: this.outputOpacity,
-                        fill: this.autoFillHoles,
-                        inverted: this.maskInverted,
-                    },
+                    outputState,
                 };
             })();
             this.onSave(task, previewTask);
@@ -2370,9 +2489,13 @@ function installLoadImagePersistence(node) {
     if (!imageWidget || imageWidget._guhaiPersistWrapped) return;
     const originalCallback = imageWidget.callback;
     imageWidget.callback = function () {
-        const skipOriginalPreview = !!node._guhaiSkipOriginalImageCallback;
-        const result = skipOriginalPreview ? undefined : originalCallback?.apply(this, arguments);
+        if (cropWidget(node)) cropWidget(node).value = "";
+        // The crop controller keeps the previous preview until the complete
+        // new preview is ready. A stock preview here would race that swap.
+        const ownsPreview = node._guhaiCrop && !isEmptyImageValue(imageWidget.value);
+        const result = ownsPreview ? undefined : originalCallback?.apply(this, arguments);
         persistLoadImageState(node);
+        node._guhaiCrop?.update(true);
         if (isEmptyImageValue(imageWidget.value)) {
             keepEmptyLoadImageNodeInteractive(node);
             // The stock image widget can finish clearing its preview after the
@@ -2626,7 +2749,10 @@ function removeNodeToolbar(node) {
 }
 
 function setNodePreview(node, dataUrl) {
-    const apply = () => loadImage(dataUrl).then((img) => {
+    const value = findImageWidget(node)?.value;
+    if (node._guhaiCrop) return node._guhaiCrop.setPreview(dataUrl);
+    const apply = () => Promise.resolve(dataUrl).then(loadImage).then((img) => {
+        if (isLoadImageGoohaiNode(node) && value !== findImageWidget(node)?.value) return;
         node.imgs = [img];
         node.imageIndex = null;
         node.setDirtyCanvas(true, true);
@@ -2827,6 +2953,7 @@ function refreshNodes2MaskPreviews(root = document) {
         const node = nodeId != null
             ? (app.graph?.getNodeById?.(nodeId) || app.graph?.getNodeById?.(Number(nodeId)))
             : null;
+        if (isLoadImageGoohaiNode(node) && node._guhaiCrop) continue;
         const widgetRoot = img.closest?.("[data-node-id]")?.querySelector?.('[data-testid="node-widgets"]');
         const renderedMaskedValue = [...(widgetRoot?.querySelectorAll?.("button, span") || [])]
             .map((element) => String(element.textContent || "").trim())
@@ -3029,6 +3156,7 @@ function installQueueWaiter() {
     const origQueuePrompt = app.queuePrompt;
     app.queuePrompt = async function () {
         await waitForPendingMaskSaves();
+        for (const controller of loaderCrops) controller.editor.confirmForQueue();
         return origQueuePrompt.apply(this, arguments);
     };
     app._guhaiMaskQueueWaiterInstalled = true;
@@ -3125,9 +3253,11 @@ function clearMaskForNode(node) {
     if (!imageWidget?.value) return false;
     const originalValue = originalValueFromMaskValue(imageWidget.value);
     if (!originalValue) return false;
+    rebindCrop(node, originalValue);
     imageWidget.value = originalValue;
     addImageWidgetOption(imageWidget, originalValue);
-    if (typeof imageWidget.callback === "function") imageWidget.callback(originalValue);
+    persistLoadImageState(node);
+    if (!node._guhaiCrop) imageWidget.callback?.(originalValue);
     try {
         setNodePreview(node, imageUrlFromParts(parseImageValue(originalValue)));
     } catch (_) {}
@@ -3158,6 +3288,7 @@ function installMaskEditorHotkey() {
             activeEditor.keyDown(e);
             return;
         }
+        if (handleCropKey(e)) return;
         if (e.repeat) return;
         const isZ = isZKeyEvent(e);
         const isX = isXKeyEvent(e);
@@ -3189,12 +3320,7 @@ async function uploadSelectedImageForNode(node, file) {
     const imageWidget = findImageWidget(node);
     if (!imageWidget) return;
     imageWidget.value = value;
-    persistLoadImageState(node);
-    if (typeof imageWidget.callback === "function") imageWidget.callback(value);
-    try {
-        setNodePreview(node, imageUrlFromParts(parseImageValue(value)));
-    } catch (_) {}
-    prewarmEditorForNode(node);
+    imageWidget.callback?.(value);
     node.setDirtyCanvas(true, true);
     app.graph?.change?.();
 }
@@ -3427,12 +3553,13 @@ function initializeLoadImageNode(node, { floating = false } = {}) {
         restoreLoadImageState(node);
         installLoadImagePersistence(node);
         installImageWidgetPrewarm(node);
+        if (isLoadImageGoohaiNode(node)) installLoaderCrop(node);
         if (floating) {
             hideBulkyWidgets(node);
             installFloatingButtons(node);
         }
         prewarmEditorForNode(node);
-        refreshClipspacePreview(node);
+        if (!node._guhaiCrop) refreshClipspacePreview(node);
         setTimeout(() => refreshNodes2MaskPreviews(), 100);
         setTimeout(() => refreshNodes2MaskPreviews(), 1200);
         node.setDirtyCanvas(true, true);
@@ -3459,6 +3586,8 @@ function openEditorForNode(node) {
     const sources = getEditorSources(imageWidget.value);
     const parsedValue = parseImageValue(imageWidget.value);
     const savedOutputState = node.properties?.guhaiMaskOutputState || null;
+    const cropRect = savedCrop(node)?.rect || null;
+    cancelCrop();
     const nodeId = node.id;
     const currentNode = () => app.graph?.getNodeById?.(nodeId) || node;
     // Mark the node before constructing the editor. A workflow undo/configure
@@ -3472,6 +3601,7 @@ function openEditorForNode(node) {
         maskMode: sources.maskMode,
         preserveRgbUnderMask: isOfficialLoadImageNode(node),
         outputState: sources.outputState || savedOutputState || null,
+        cropRect,
         onSave(saveTask, immediatePreviewTask) {
             let targetNode = currentNode();
             targetNode._guhaiMaskEditorSavePending = true;
@@ -3494,16 +3624,9 @@ function openEditorForNode(node) {
                 if (!targetWidget) throw new Error("加载图像节点已不存在");
                 targetNode.properties ||= {};
                 if (outputState) targetNode.properties.guhaiMaskOutputState = outputState;
+                rebindCrop(targetNode, value);
                 targetWidget.value = value;
                 persistLoadImageState(targetNode);
-                // Persist the saved value without asking the stock legacy
-                // image widget to load the black alpha-mask as a preview.
-                targetNode._guhaiSkipOriginalImageCallback = true;
-                try {
-                    if (typeof targetWidget.callback === "function") targetWidget.callback(value);
-                } finally {
-                    targetNode._guhaiSkipOriginalImageCallback = false;
-                }
                 if (previewDataUrl) setNodePreview(targetNode, previewDataUrl);
                 if (previewTask) {
                     Promise.resolve(previewTask)
@@ -3534,20 +3657,23 @@ function openEditorForNode(node) {
     node._guhaiMaskEditorActive = editor;
 }
 
-async function refreshClipspacePreview(node) {
-    const imageWidget = findImageWidget(node);
-    const value = String(imageWidget?.value || "");
-    if (!value || (!value.includes("painted-masked") && !value.includes("painted-output-") && !value.includes("clipspace-mask-"))) return;
+function refreshClipspacePreview(node) {
+    const value = String(findImageWidget(node)?.value || "");
+    if (value.includes("painted-masked") || value.includes("painted-output-") || value.includes("clipspace-mask-")) {
+        setNodePreview(node, maskPreviewUrl(value, node.properties?.guhaiMaskOutputState));
+    }
+}
+
+async function maskPreviewUrl(value, savedOutputState) {
     try {
-        const sources = getEditorSources(imageWidget.value);
-        const outputState = sources.outputState || node.properties?.guhaiMaskOutputState;
+        const sources = getEditorSources(value);
+        const outputState = sources.outputState || savedOutputState;
         if (outputState?.mode === "color") {
             const colorPreview = await colorOutputPreviewUrl(sources, outputState);
-            if (colorPreview) setNodePreview(node, colorPreview);
-            return;
+            if (colorPreview) return colorPreview;
         }
         const img = await loadImage(sources.imageUrl);
-        const parsedValue = parseImageValue(imageWidget.value);
+        const parsedValue = parseImageValue(value);
         const effectiveMaskUrl = parsedValue.filename.includes("painted-output-")
             ? imageUrlFromParts(parsedValue)
             : sources.maskUrl;
@@ -3558,12 +3684,13 @@ async function refreshClipspacePreview(node) {
         const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         const tmp = document.createElement("canvas");
-        tmp.width = canvas.width;
-        tmp.height = canvas.height;
+        const scale = Math.min(1, MAX_EDIT_LONG_SIDE / Math.max(canvas.width, canvas.height));
+        tmp.width = Math.max(1, Math.round(canvas.width * scale));
+        tmp.height = Math.max(1, Math.round(canvas.height * scale));
         const tctx = tmp.getContext("2d");
         tctx.drawImage(mask, 0, 0, tmp.width, tmp.height);
         const md = tctx.getImageData(0, 0, tmp.width, tmp.height).data;
-        const overlay = ctx.createImageData(canvas.width, canvas.height);
+        const overlay = tctx.createImageData(tmp.width, tmp.height);
         for (let i = 0; i < md.length; i += 4) {
             overlay.data[i] = 42;
             overlay.data[i + 1] = 210;
@@ -3571,9 +3698,12 @@ async function refreshClipspacePreview(node) {
             overlay.data[i + 3] = md[i + 3] < 250 ? 128 : 0;
         }
         tmp.getContext("2d").putImageData(overlay, 0, 0);
-        ctx.drawImage(tmp, 0, 0);
-        setNodePreview(node, await canvasToObjectUrl(canvas, "image/png"));
-    } catch (_) {}
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(tmp, 0, 0, canvas.width, canvas.height);
+        return await canvasToObjectUrl(canvas, "image/png");
+    } catch (_) {
+        return imageUrlFromParts(parseImageValue(value));
+    }
 }
 
 function installMaskEditorMenu(nodeType) {
@@ -3594,6 +3724,7 @@ app.registerExtension({
     name: EXT_NAME,
     init() {
         injectStyles();
+        installLoaderCropRefresh();
         installMaskEditorHotkey();
         installNodes2MaskPreviewObserver();
         installCanvasImageDropFallback();
