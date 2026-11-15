@@ -1,5 +1,6 @@
 import os
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 
@@ -46,4 +47,8 @@ for file_path in nodes_dir.glob("*.py"):
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
 
 # 打印加载信息
-print(f'\033[92m[GoohaiTools]\033[0m \033[93m{len(NODE_CLASS_MAPPINGS)} nodes\033[0m loaded | \033[94mColorWidget enabled\033[0m')
+logging.info(
+    '\033[1m[GoohaiTools] %s nodes loaded | ColorWidget enabled\033[0m',
+    len(NODE_CLASS_MAPPINGS),
+    extra={"color": "cyan"},
+)

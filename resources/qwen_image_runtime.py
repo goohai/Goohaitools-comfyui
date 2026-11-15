@@ -928,12 +928,14 @@ class QwenImageRuntime:
                     "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
                     "reasoning_budget": 0,
                 }
+                attempts = 1
                 result = _chat_completion_with_interrupt(llm, completion_kwargs)
                 _raise_if_processing_interrupted()
                 text = result["choices"][0]["message"]["content"]
                 try:
                     parsed = _normalize_result(_parse_json(text), editing_mode)
                 except ValueError:
+                    attempts += 1
                     cls._clear_state_locked(llm)
                     completion_kwargs["reasoning_budget"] = 0
                     completion_kwargs["response_format"] = {
@@ -954,8 +956,10 @@ class QwenImageRuntime:
                     f"image={encoded_at - loaded_at:.2f}s, "
                     f"infer={completed_at - encoded_at:.2f}s, "
                     f"total={completed_at - started_at:.2f}s, images={len(images)}, "
+                    f"attempts={attempts}, output_chars={len(text or '')}, "
                     f"prompt_tokens={usage.get('prompt_tokens', '?')}, "
-                    f"completion_tokens={usage.get('completion_tokens', '?')}"
+                    f"completion_tokens={usage.get('completion_tokens', '?')}",
+                    flush=True,
                 )
             finally:
                 cls._clear_state_locked(llm)

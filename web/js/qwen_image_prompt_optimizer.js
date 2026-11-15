@@ -3,6 +3,7 @@ import { api } from "../../../scripts/api.js";
 
 const MAX_IMAGES = 10;
 const NODE_NAME = "QwenImagePromptOptimizer";
+const SKILL_INPUT_NAME = "自定义skill";
 const PROMPT_HEIGHT_PROPERTY = "qwen_prompt_height";
 const MIN_PROMPT_HEIGHT = 64;
 const SEED_WIDGET_NAMES = new Set(["种子值", "seed"]);
@@ -18,6 +19,36 @@ const isImageInput = (slot) => {
 
 function connected(slot) {
     return slot?.link != null;
+}
+
+function syncSkillInput(node) {
+    if (!node.inputs?.some((input) => input.name === SKILL_INPUT_NAME)) {
+        node.addInput(SKILL_INPUT_NAME, "STRING", { shape: 7 });
+    }
+    const inputs = node.inputs;
+    // New frontends resolve input.link by its current slot index, so capture
+    // link ownership before changing the input order.
+    const links = node.graph?.links;
+    const inputLinks = inputs.map((input) => {
+        const id = input.link;
+        return id == null ? null : (links?.get ? links.get(id) : links?.[id]);
+    });
+    const originalInputs = [...inputs];
+    const skillIndex = inputs.findIndex((input) => input.name === SKILL_INPUT_NAME);
+    const [skill] = inputs.splice(skillIndex, 1);
+    skill.label = "skill";
+    skill.localized_name = "skill";
+    const targetIndex = inputs.findLastIndex((input) => isImageInput(input)) + 1;
+    inputs.splice(targetIndex, 0, skill);
+    const movedLinks = originalInputs.flatMap((input, index) => {
+        const link = inputLinks[index];
+        const target = inputs.indexOf(input);
+        return link && link.target_slot !== target ? [{ link, target }] : [];
+    });
+    // Free the old targets first: the topology store rejects occupied targets
+    // when both skill and a displaced widget input have connections.
+    movedLinks.forEach(({ link }, index) => { link.target_slot = inputs.length + index; });
+    movedLinks.forEach(({ link, target }) => { link.target_slot = target; });
 }
 
 function promptWidget(node) {
@@ -271,6 +302,7 @@ function sync(node) {
         slot.label = `图像 ${number + 1}`;
         number += 1;
     }
+    syncSkillInput(node);
     node.setDirtyCanvas?.(true, true);
 }
 
@@ -292,6 +324,7 @@ app.registerExtension({
                     ...this.inputs.filter((input) => !inputNames.includes(input.name) && !isImageInput(input)),
                 ];
             }
+            this._qwenImageScheduleSync?.();
             return result;
         };
 
