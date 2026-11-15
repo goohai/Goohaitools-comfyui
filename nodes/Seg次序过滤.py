@@ -1,6 +1,8 @@
 import torch
 import numpy as np
-from typing import List, Tuple, Dict
+import cv2
+from typing import List, Tuple
+from types import SimpleNamespace
 import sys
 
 class 孤海Seg次序过滤:
@@ -8,7 +10,6 @@ class 孤海Seg次序过滤:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "Seg": ("SEGS",),
                 "优先规则": ([
                     "面积大小",
                     "宽度大小", 
@@ -36,7 +37,15 @@ class 孤海Seg次序过滤:
                     "step": 1,
                     "display": "分组阈值(X坐标接近程度)"
                 }),
-            }
+            },
+            "optional": {
+                "Seg": ("SEGS",),
+                "masks": ("MASK", {"tooltip": "按每张遮罩的最大连通区域排序，输出保留完整遮罩；同时连接 Seg 时以 Seg 为准。"}),
+                "合并遮罩": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "开启时合并筛选后的 Mask，关闭时输出遮罩组；Seg 输出始终保留独立分段。"
+                }),
+            },
         }
     
     RETURN_TYPES = ("SEGS", "MASK")
@@ -46,11 +55,13 @@ class 孤海Seg次序过滤:
     
     def get_segment_area(self, seg) -> float:
         """计算分割区域的面积"""
+        if hasattr(seg, 'sort_area'):
+            return seg.sort_area
         if hasattr(seg, 'cropped_mask') and seg.cropped_mask is not None:
             mask = seg.cropped_mask
             if isinstance(mask, torch.Tensor):
                 if mask.dim() == 3:
-                    mask = mask[0]  # 如果是3D，取第一个通道
+                    mask = mask[0]  # 保持旧版 Seg 面积排序规则
                 return float(torch.sum(mask > 0.1).item())
             elif isinstance(mask, np.ndarray):
                 return float(np.sum(mask > 0.1))
@@ -168,59 +179,50 @@ class 孤海Seg次序过滤:
         
         return result
     
-    def create_full_mask(self, shape, segs, crop_regions) -> torch.Tensor:
-        """创建完整的全图mask，将各个seg的mask放置到正确位置"""
+    @staticmethod
+    def mask_batch(mask) -> torch.Tensor:
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask)
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        elif mask.dim() == 4:
+            if mask.shape[1] == 1:
+                mask = mask.squeeze(1)
+            elif mask.shape[0] == 1:
+                mask = mask.squeeze(0)
+        if mask.dim() != 3:
+            raise ValueError("遮罩应为 [H, W] 或 [B, H, W] 格式")
+        return mask
+
+    def create_full_mask(self, shape, segs, crop_regions, merge=True) -> torch.Tensor:
         h, w = shape
         full_mask = torch.zeros((h, w), dtype=torch.float32)
-        
-        for i, seg in enumerate(segs):
-            crop_region = crop_regions[i]
-            mask = self.get_segment_mask(seg)
-            
-            # 确保mask是2D
-            if mask.dim() == 3:
-                mask = mask[0] if mask.shape[0] == 1 else mask
-            if mask.dim() == 3:
-                mask = mask.squeeze(0)
-            
-            # 获取crop区域坐标
+        mask_batches = []
+        for seg, crop_region in zip(segs, crop_regions):
+            mask = self.mask_batch(self.get_segment_mask(seg)).to(device='cpu', dtype=torch.float32)
             x1, y1, x2, y2 = crop_region
-            
-            # 调整mask尺寸以匹配crop区域
             crop_h, crop_w = y2 - y1, x2 - x1
-            if mask.shape != (crop_h, crop_w):
+            if mask.shape[-2:] != (crop_h, crop_w):
                 mask = torch.nn.functional.interpolate(
-                    mask.unsqueeze(0).unsqueeze(0),
-                    size=(crop_h, crop_w),
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze(0).squeeze(0)
-            
-            # 将mask放置到正确位置
-            if y1 >= 0 and y2 <= h and x1 >= 0 and x2 <= w:
-                full_mask[y1:y2, x1:x2] = torch.maximum(full_mask[y1:y2, x1:x2], mask)
-        
-        return full_mask
-    
-    def filter_segments(self, Seg, 优先规则: str, 正反顺序: str, 开始索引: int, 过滤数量: int, 分组阈值: int) -> Tuple[tuple, torch.Tensor]:
-        # 解包SEGS数据结构
-        # SEGS是一个元组：(image_shape, segs_list)
-        if isinstance(Seg, tuple) and len(Seg) == 2:
-            image_shape, segs_list = Seg
-        else:
-            # 如果不是预期的格式，则使用默认值
-            image_shape = (0, 0)
-            segs_list = []
-            if isinstance(Seg, list):
-                segs_list = Seg
-        
-        if not segs_list:
-            # 没有分割区域，返回空的SEGS和全黑mask
-            h, w = image_shape if image_shape != (0, 0) else (512, 512)
-            empty_mask = torch.zeros((h, w), dtype=torch.float32)
-            empty_segs = (image_shape, [])
-            return (empty_segs, empty_mask)
-        
+                    mask.unsqueeze(1), size=(crop_h, crop_w),
+                    mode='bilinear', align_corners=False
+                ).squeeze(1)
+            if merge:
+                if y1 >= 0 and y2 <= h and x1 >= 0 and x2 <= w:
+                    full_mask[y1:y2, x1:x2] = torch.maximum(
+                        full_mask[y1:y2, x1:x2], mask.amax(dim=0)
+                    )
+            else:
+                batch = torch.zeros((mask.shape[0], h, w), dtype=torch.float32)
+                if y1 >= 0 and y2 <= h and x1 >= 0 and x2 <= w:
+                    batch[:, y1:y2, x1:x2] = mask
+                mask_batches.append(batch)
+        if merge:
+            # 保留旧工作流的二维合并 Mask 输出。
+            return full_mask
+        return torch.cat(mask_batches, dim=0) if mask_batches else full_mask.unsqueeze(0)
+
+    def sort_segments(self, segs_list, 优先规则, 正反顺序, 分组阈值):
         # 对分割区域进行排序
         reverse_sort = (正反顺序 == "正序")
         
@@ -252,122 +254,66 @@ class 孤海Seg次序过滤:
             # 默认不排序
             sorted_segs = segs_list
         
-        num_segments = len(sorted_segs)
-        
-        # 修改：当过滤数量为0时，输出从开始索引以后的所有seg
-        if 过滤数量 == 0:
-            # 计算实际要获取的分割区域索引（从开始索引到末尾）
-            if 开始索引 >= num_segments:
-                # 开始索引超出范围，返回空的SEGS和全黑mask
-                h, w = image_shape
-                empty_mask = torch.zeros((h, w), dtype=torch.float32)
-                empty_segs = (image_shape, [])
-                return (empty_segs, empty_mask)
-            
-            # 获取从开始索引到末尾的所有seg
-            selected_indices = list(range(开始索引, num_segments))
-            selected_segs = [sorted_segs[idx] for idx in selected_indices]
-            
-            # 创建新的SEGS
-            new_segs = (image_shape, selected_segs)
-            
-            # 创建完整的mask
-            if not selected_segs:
-                # 如果没有选中的seg，返回全黑mask
-                h, w = image_shape
-                empty_mask = torch.zeros((h, w), dtype=torch.float32)
-                return (new_segs, empty_mask)
-            elif len(selected_segs) == 1:
-                # 单个seg，直接创建mask
-                seg = selected_segs[0]
-                mask = self.get_segment_mask(seg)
-                crop_region = seg.crop_region
-                
-                # 确保mask是2D
-                if mask.dim() == 3:
-                    mask = mask[0] if mask.shape[0] == 1 else mask
-                if mask.dim() == 3:
-                    mask = mask.squeeze(0)
-                
-                # 获取crop区域坐标
-                x1, y1, x2, y2 = crop_region
-                
-                # 调整mask尺寸以匹配crop区域
-                crop_h, crop_w = y2 - y1, x2 - x1
-                if mask.shape != (crop_h, crop_w):
-                    mask = torch.nn.functional.interpolate(
-                        mask.unsqueeze(0).unsqueeze(0),
-                        size=(crop_h, crop_w),
-                        mode='bilinear',
-                        align_corners=False
-                    ).squeeze(0).squeeze(0)
-                
-                # 创建全图mask
-                h, w = image_shape
-                full_mask = torch.zeros((h, w), dtype=torch.float32)
-                if y1 >= 0 and y2 <= h and x1 >= 0 and x2 <= w:
-                    full_mask[y1:y2, x1:x2] = mask
-                merged_mask = full_mask
-            else:
-                # 多个seg，合并mask
-                crop_regions = [seg.crop_region for seg in selected_segs]
-                merged_mask = self.create_full_mask(image_shape, selected_segs, crop_regions)
-            
-            return (new_segs, merged_mask)
-        
-        # 限制过滤数量不超过实际分割数量
-        过滤数量 = min(过滤数量, num_segments)
-        
-        # 计算实际要获取的分割区域索引
-        selected_indices = []
-        for i in range(过滤数量):
-            idx = (开始索引 + i) % num_segments
-            selected_indices.append(idx)
-        
-        # 获取选中的分割区域
-        selected_segs = [sorted_segs[idx] for idx in selected_indices]
-        
-        # 创建新的SEGS
-        new_segs = (image_shape, selected_segs)
-        
-        # 创建完整的mask
-        h, w = image_shape
-        if 过滤数量 == 1:
-            # 单个seg，直接创建mask
-            seg = selected_segs[0]
-            mask = self.get_segment_mask(seg)
-            crop_region = seg.crop_region
-            
-            # 确保mask是2D
-            if mask.dim() == 3:
-                mask = mask[0] if mask.shape[0] == 1 else mask
-            if mask.dim() == 3:
-                mask = mask.squeeze(0)
-            
-            # 获取crop区域坐标
-            x1, y1, x2, y2 = crop_region
-            
-            # 调整mask尺寸以匹配crop区域
-            crop_h, crop_w = y2 - y1, x2 - x1
-            if mask.shape != (crop_h, crop_w):
-                mask = torch.nn.functional.interpolate(
-                    mask.unsqueeze(0).unsqueeze(0),
-                    size=(crop_h, crop_w),
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze(0).squeeze(0)
-            
-            # 创建全图mask
-            full_mask = torch.zeros((h, w), dtype=torch.float32)
-            if y1 >= 0 and y2 <= h and x1 >= 0 and x2 <= w:
-                full_mask[y1:y2, x1:x2] = mask
-            merged_mask = full_mask
+        return sorted_segs
+
+    @staticmethod
+    def select_segments(sorted_segs, start, count):
+        if not sorted_segs:
+            return []
+        if count == 0:
+            return sorted_segs[start:]
+        return [sorted_segs[(start + i) % len(sorted_segs)]
+                for i in range(min(count, len(sorted_segs)))]
+
+    def filter_masks(self, masks, 优先规则, 正反顺序, 开始索引, 过滤数量, 分组阈值, 合并遮罩):
+        batch = self.mask_batch(masks)
+        h, w = batch.shape[-2:]
+        empty_segs = ((h, w), [])
+        # 单张遮罩原样输出，不受索引、过滤数量和合并开关影响。
+        if batch.shape[0] == 1:
+            return (empty_segs, masks)
+
+        segments = []
+        for mask in batch:
+            active = (mask > 0.1).to(device='cpu', dtype=torch.uint8).numpy()
+            count, _, stats, _ = cv2.connectedComponentsWithStats(active, connectivity=8)
+            bbox, area = (0, 0, 0, 0), 0
+            if count > 1:
+                component = stats[1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])]
+                x, y, width, height, area = map(int, component)
+                bbox = (x, y, x + width, y + height)
+            # 只用最大连通区域计算排序特征，输出仍保留原始完整遮罩。
+            segments.append(SimpleNamespace(cropped_mask=mask, bbox=bbox, sort_area=area))
+        sorted_segs = self.sort_segments(segments, 优先规则, 正反顺序, 分组阈值)
+        selected = self.select_segments(sorted_segs, 开始索引, 过滤数量)
+        if not selected:
+            return (empty_segs, batch.new_zeros((1, h, w)))
+        result = torch.stack([seg.cropped_mask for seg in selected])
+        if 合并遮罩:
+            result = result.amax(dim=0, keepdim=True)
+        return (empty_segs, result)
+
+    def filter_segments(self, Seg=None, 优先规则: str = "面积大小", 正反顺序: str = "正序",
+                        开始索引: int = 0, 过滤数量: int = 1, 分组阈值: int = 50,
+                        masks=None, 合并遮罩: bool = True) -> Tuple[tuple, torch.Tensor]:
+        if Seg is None and masks is not None:
+            return self.filter_masks(masks, 优先规则, 正反顺序, 开始索引, 过滤数量, 分组阈值, 合并遮罩)
+
+        if isinstance(Seg, tuple) and len(Seg) == 2:
+            image_shape, segs_list = Seg
         else:
-            # 多个seg，合并mask
-            crop_regions = [seg.crop_region for seg in selected_segs]
-            merged_mask = self.create_full_mask(image_shape, selected_segs, crop_regions)
-        
-        return (new_segs, merged_mask)
+            image_shape = (0, 0)
+            segs_list = Seg if isinstance(Seg, list) else []
+        if not segs_list:
+            h, w = image_shape if image_shape != (0, 0) else (512, 512)
+            empty_mask = torch.zeros((h, w), dtype=torch.float32)
+            return ((image_shape, []), empty_mask if 合并遮罩 else empty_mask.unsqueeze(0))
+
+        sorted_segs = self.sort_segments(segs_list, 优先规则, 正反顺序, 分组阈值)
+        selected_segs = self.select_segments(sorted_segs, 开始索引, 过滤数量)
+        crop_regions = [seg.crop_region for seg in selected_segs]
+        mask = self.create_full_mask(image_shape, selected_segs, crop_regions, 合并遮罩)
+        return ((image_shape, selected_segs), mask)
 
 # 节点注册映射
 NODE_CLASS_MAPPINGS = {
