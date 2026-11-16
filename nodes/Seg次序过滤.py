@@ -41,6 +41,13 @@ class 孤海Seg次序过滤:
             "optional": {
                 "Seg": ("SEGS",),
                 "masks": ("MASK", {"tooltip": "按每张遮罩的最大连通区域排序，输出保留完整遮罩；同时连接 Seg 时以 Seg 为准。"}),
+                "舍弃因子": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 5.0,
+                    "step": 0.01,
+                    "tooltip": "0 关闭筛选；1 个遮罩直接输出。非 0 时先舍弃中心点位于画布任一侧外缘 1/15 区域内的遮罩，不参与参照计算。按输入数量：2～3 个取九宫格中心区域内最靠近画面中心的遮罩，没有则取长边最大的；4 个取最靠近中心的 2 个，5 个及以上取 3 个，排除长边不足候选最大长边 2/3 的小遮罩后计算平均长边 a。位置按白色区域外接矩形中心点判断。舍弃长边与 a 的差超过 因子×a 的遮罩。0.5 保留 [0.5a, 1.5a]；越大越宽松。尺寸筛选全部舍弃时恢复非边缘候选；边缘排除全部舍弃时恢复原输入。"
+                }),
                 "合并遮罩": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "开启时合并筛选后的 Mask，关闭时输出遮罩组；Seg 输出始终保留独立分段。"
@@ -71,8 +78,8 @@ class 孤海Seg次序过滤:
         """获取分割区域的边界框信息"""
         if hasattr(seg, 'bbox'):
             bbox = seg.bbox
-            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                return bbox
+            if isinstance(bbox, (list, tuple, np.ndarray, torch.Tensor)) and len(bbox) >= 4:
+                return tuple(float(value) for value in bbox[:4])
         return (0, 0, 0, 0)
     
     def get_segment_mask(self, seg) -> torch.Tensor:
@@ -256,16 +263,87 @@ class 孤海Seg次序过滤:
         
         return sorted_segs
 
+    def get_white_bbox(self, seg, image_shape):
+        """使用实际白色区域（含所有连通区域），而非检测框或裁剪框。"""
+        h, w = image_shape
+        x1, y1, x2, y2 = seg.crop_region
+        mask = self.mask_batch(self.get_segment_mask(seg))
+        if x2 <= x1 or y2 <= y1:
+            return (0, 0, 0, 0)
+        if mask.shape[-2:] != (y2 - y1, x2 - x1):
+            mask = torch.nn.functional.interpolate(
+                mask.to(dtype=torch.float32).unsqueeze(1), size=(y2 - y1, x2 - x1),
+                mode='bilinear', align_corners=False
+            ).squeeze(1)
+        left, top = max(0, x1), max(0, y1)
+        right, bottom = min(w, x2), min(h, y2)
+        if right <= left or bottom <= top:
+            return (0, 0, 0, 0)
+        active = (mask[:, top-y1:bottom-y1, left-x1:right-x1] > 0.1).any(dim=0)
+        x, y, width, height = cv2.boundingRect(active.to(device='cpu', dtype=torch.uint8).numpy())
+        if width == 0 or height == 0:
+            return (0, 0, 0, 0)
+        return (left + x, top + y, left + x + width, top + y + height)
+
+    @staticmethod
+    def get_reference_lengths(bboxes, image_shape, input_count):
+        h, w = image_shape
+        if h <= 0 or w <= 0:
+            return []
+        candidates = [
+            (max(x2 - x1, y2 - y1), (x1 + x2) / (2 * w), (y1 + y2) / (2 * h))
+            for x1, y1, x2, y2 in bboxes if x2 > x1 and y2 > y1
+        ]
+        if not candidates:
+            return []
+        if input_count <= 3:
+            central = [item for item in candidates
+                       if 1/3 <= item[1] <= 2/3 and 1/3 <= item[2] <= 2/3]
+            if not central:
+                return [max(item[0] for item in candidates)]
+            candidates = central
+            reference_count = 1
+        else:
+            reference_count = 2 if input_count == 4 else 3
+        nearest = sorted(candidates, key=lambda item: ((item[1] - 0.5)**2 + (item[2] - 0.5)**2,
+                                                        -item[2]))[:reference_count]
+        largest = max(item[0] for item in nearest)
+        # 小脸不参与参照平均，避免背景人脸拉低基准而误删主体。
+        return [item[0] for item in nearest if item[0] >= largest * 2 / 3]
+
+    def discard_by_size(self, segments, image_shape, factor):
+        if factor == 0 or len(segments) <= 1:
+            return segments
+        bboxes = [self.get_white_bbox(seg, image_shape) for seg in segments]
+        h, w = image_shape
+        interior = [(seg, bbox) for seg, bbox in zip(segments, bboxes)
+                    if w / 15 < (bbox[0] + bbox[2]) / 2 < w * 14 / 15
+                    and h / 15 < (bbox[1] + bbox[3]) / 2 < h * 14 / 15]
+        if not interior:
+            return segments
+        input_count = len(segments)
+        segments = [seg for seg, _ in interior]
+        bboxes = [bbox for _, bbox in interior]
+        lengths = [max(x2 - x1, y2 - y1) for x1, y1, x2, y2 in bboxes]
+        reference_lengths = self.get_reference_lengths(bboxes, image_shape, input_count)
+        if not reference_lengths:
+            return segments
+        average = sum(reference_lengths) / len(reference_lengths)
+        retained = [seg for seg, length in zip(segments, lengths)
+                    if length > 0 and abs(length - average) <= factor * average]
+        return retained or segments
+
     @staticmethod
     def select_segments(sorted_segs, start, count):
         if not sorted_segs:
             return []
         if count == 0:
-            return sorted_segs[start:]
+            # 索引超出范围时也保留一个候选，避免有输入却选出空列表。
+            return sorted_segs[start:] or [sorted_segs[start % len(sorted_segs)]]
         return [sorted_segs[(start + i) % len(sorted_segs)]
                 for i in range(min(count, len(sorted_segs)))]
 
-    def filter_masks(self, masks, 优先规则, 正反顺序, 开始索引, 过滤数量, 分组阈值, 合并遮罩):
+    def filter_masks(self, masks, 优先规则, 正反顺序, 开始索引, 过滤数量, 分组阈值, 合并遮罩, 舍弃因子=0.0):
         batch = self.mask_batch(masks)
         h, w = batch.shape[-2:]
         empty_segs = ((h, w), [])
@@ -283,9 +361,14 @@ class 孤海Seg次序过滤:
                 x, y, width, height, area = map(int, component)
                 bbox = (x, y, x + width, y + height)
             # 只用最大连通区域计算排序特征，输出仍保留原始完整遮罩。
-            segments.append(SimpleNamespace(cropped_mask=mask, bbox=bbox, sort_area=area))
-        sorted_segs = self.sort_segments(segments, 优先规则, 正反顺序, 分组阈值)
-        selected = self.select_segments(sorted_segs, 开始索引, 过滤数量)
+            segments.append(SimpleNamespace(cropped_mask=mask, bbox=bbox, sort_area=area,
+                                            crop_region=(0, 0, w, h)))
+        segments = self.discard_by_size(segments, (h, w), 舍弃因子)
+        if len(segments) <= 1:
+            selected = segments
+        else:
+            sorted_segs = self.sort_segments(segments, 优先规则, 正反顺序, 分组阈值)
+            selected = self.select_segments(sorted_segs, 开始索引, 过滤数量)
         if not selected:
             return (empty_segs, batch.new_zeros((1, h, w)))
         result = torch.stack([seg.cropped_mask for seg in selected])
@@ -295,9 +378,9 @@ class 孤海Seg次序过滤:
 
     def filter_segments(self, Seg=None, 优先规则: str = "面积大小", 正反顺序: str = "正序",
                         开始索引: int = 0, 过滤数量: int = 1, 分组阈值: int = 50,
-                        masks=None, 合并遮罩: bool = True) -> Tuple[tuple, torch.Tensor]:
+                        masks=None, 合并遮罩: bool = True, 舍弃因子: float = 0.0) -> Tuple[tuple, torch.Tensor]:
         if Seg is None and masks is not None:
-            return self.filter_masks(masks, 优先规则, 正反顺序, 开始索引, 过滤数量, 分组阈值, 合并遮罩)
+            return self.filter_masks(masks, 优先规则, 正反顺序, 开始索引, 过滤数量, 分组阈值, 合并遮罩, 舍弃因子)
 
         if isinstance(Seg, tuple) and len(Seg) == 2:
             image_shape, segs_list = Seg
@@ -309,8 +392,12 @@ class 孤海Seg次序过滤:
             empty_mask = torch.zeros((h, w), dtype=torch.float32)
             return ((image_shape, []), empty_mask if 合并遮罩 else empty_mask.unsqueeze(0))
 
-        sorted_segs = self.sort_segments(segs_list, 优先规则, 正反顺序, 分组阈值)
-        selected_segs = self.select_segments(sorted_segs, 开始索引, 过滤数量)
+        segs_list = self.discard_by_size(segs_list, image_shape, 舍弃因子)
+        if len(segs_list) <= 1:
+            selected_segs = segs_list
+        else:
+            sorted_segs = self.sort_segments(segs_list, 优先规则, 正反顺序, 分组阈值)
+            selected_segs = self.select_segments(sorted_segs, 开始索引, 过滤数量)
         crop_regions = [seg.crop_region for seg in selected_segs]
         mask = self.create_full_mask(image_shape, selected_segs, crop_regions, 合并遮罩)
         return ((image_shape, selected_segs), mask)
