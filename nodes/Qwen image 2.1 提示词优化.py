@@ -281,7 +281,10 @@ class QwenImagePromptOptimizer:
                     "tooltip": "连接自定义 skill 或一句简单要求作为系统提示词；未连接或文本为空时使用内置系统提示词。输出格式由节点自动处理，输出语言和透明背景仍由节点控制。",
                 }),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "goohai_bypass": ("BOOLEAN", {"default": False}),
+            },
         }
 
     RETURN_TYPES = ("STRING", "STRING", "BOOLEAN")
@@ -306,8 +309,13 @@ class QwenImagePromptOptimizer:
         卸载模型="自动",
         unique_id=None,
         自定义skill=None,
+        goohai_bypass=False,
         **kwargs,
     ):
+        if goohai_bypass:
+            user_prompt = "" if 用户提示词 is None else str(用户提示词)
+            return (user_prompt, user_prompt, False)
+
         if isinstance(卸载模型, bool):
             卸载模型 = "运行后自动卸载" if 卸载模型 else "保持加载"
         images = collect_images(kwargs)

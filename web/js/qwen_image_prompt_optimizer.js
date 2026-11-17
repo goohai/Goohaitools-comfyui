@@ -55,6 +55,63 @@ function promptWidget(node) {
     return node.widgets?.find((item) => item.name === "用户提示词" || item.name === "user_prompt");
 }
 
+function installBypassHook() {
+    if (app._goohaiQwenBypassHook) return;
+    const originalGraphToPrompt = app.graphToPrompt;
+    app.graphToPrompt = async function (graph = this.rootGraph || this.graph) {
+        const bypassed = [];
+        function visit(currentGraph, path = []) {
+            for (const node of currentGraph._nodes || []) {
+                const nodePath = [...path, node.id];
+                if ((node.comfyClass === NODE_NAME || node.type === NODE_NAME) && node.mode === 4) {
+                    bypassed.push({ node, id: nodePath.join(":"), widget: promptWidget(node) });
+                }
+                if (node.isSubgraphNode?.()) visit(node.subgraph, nodePath);
+            }
+        }
+        visit(graph);
+        if (!bypassed.length) return originalGraphToPrompt.apply(this, arguments);
+
+        // Serialize real prompt connections instead of ComfyUI's type-based bypass,
+        // which can select skill or an unconnected input. No inference runs here.
+        for (const { node } of bypassed) node.mode = 0;
+        let prompt;
+        try {
+            prompt = await originalGraphToPrompt.call(this, graph);
+        } finally {
+            for (const { node } of bypassed) {
+                if (node.mode === 0) node.mode = 4;
+            }
+        }
+        for (const { id, widget } of bypassed) {
+            const inputs = prompt.output[id]?.inputs;
+            if (!inputs) continue;
+            inputs["用户提示词"] ??= widget?.value ?? "";
+            inputs.goohai_bypass = true;
+            delete inputs[SKILL_INPUT_NAME];
+            for (const name of Object.keys(inputs)) {
+                if (isImageInput({ name })) delete inputs[name];
+            }
+        }
+        // Keep saved workflows in bypass mode; only the API prompt executes
+        // the inexpensive string normalization above the model-loading path.
+        const bypassIds = new Set(bypassed.map(({ node }) => node));
+        function restoreWorkflow(savedGraph, liveGraph) {
+            for (const saved of savedGraph.nodes || []) {
+                const node = liveGraph.getNodeById(saved.id);
+                if (bypassIds.has(node)) saved.mode = 4;
+            }
+            for (const saved of savedGraph.definitions?.subgraphs || []) {
+                const subgraph = liveGraph.subgraphs?.get(saved.id);
+                if (subgraph) restoreWorkflow(saved, subgraph);
+            }
+        }
+        restoreWorkflow(prompt.workflow, graph);
+        return prompt;
+    };
+    app._goohaiQwenBypassHook = true;
+}
+
 function updateSeedWidget(node, seed) {
     const widget = node.widgets?.find((item) => SEED_WIDGET_NAMES.has(item.name));
     if (!widget || !Number.isFinite(Number(seed))) return;
@@ -310,6 +367,7 @@ app.registerExtension({
     name: "goohaitools.qwen_image_prompt_optimizer",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== NODE_NAME) return;
+        installBypassHook();
         installQueueSeedHook();
         const originalConfigureNode = nodeType.prototype.configure;
         nodeType.prototype.configure = function (config) {
