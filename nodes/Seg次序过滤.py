@@ -15,7 +15,9 @@ class 孤海Seg次序过滤:
                     "宽度大小", 
                     "高度大小",
                     "左右上下",
-                    "左右下上"
+                    "左右下上",
+                    "上下左右",
+                    "下上左右"
                 ],),
                 "正反顺序": (["正序", "反序"],),
                 "开始索引": ("INT", {
@@ -35,7 +37,7 @@ class 孤海Seg次序过滤:
                     "min": 1,
                     "max": 500,
                     "step": 1,
-                    "display": "分组阈值(X坐标接近程度)"
+                    "tooltip": "百分比：先经过舍弃因子筛选，再取每张遮罩最大连通区域的外接矩形尺寸计算平均值。左右上下、左右下上使用平均宽度，上下左右、下上左右使用平均高度；50 表示平均尺寸的 50%，坐标差超过该距离才另分一组。"
                 }),
             },
             "optional": {
@@ -46,7 +48,7 @@ class 孤海Seg次序过滤:
                     "min": 0.0,
                     "max": 5.0,
                     "step": 0.01,
-                    "tooltip": "0 关闭筛选；1 个遮罩直接输出。非 0 时先舍弃中心点位于画布任一侧外缘 1/15 区域内的遮罩，不参与参照计算。按输入数量：2～3 个取九宫格中心区域内最靠近画面中心的遮罩，没有则取长边最大的；4 个取最靠近中心的 2 个，5 个及以上取 3 个，排除长边不足候选最大长边 2/3 的小遮罩后计算平均长边 a。位置按白色区域外接矩形中心点判断。舍弃长边与 a 的差超过 因子×a 的遮罩。0.5 保留 [0.5a, 1.5a]；越大越宽松。尺寸筛选全部舍弃时恢复非边缘候选；边缘排除全部舍弃时恢复原输入。"
+                    "tooltip": "0 关闭筛选；1 个遮罩直接输出。非 0 时先舍弃中心点位于画布任一侧外缘 1/20 区域内的遮罩，不参与参照计算。按输入数量：2～3 个取九宫格中心区域内最靠近画面中心的遮罩，没有则取长边最大的；4 个取最靠近中心的 2 个，5 个及以上取 3 个，排除长边不足候选最大长边 2/3 的小遮罩后计算平均长边 a。位置按白色区域外接矩形中心点判断。舍弃长边与 a 的差超过 因子×a 的遮罩。0.5 保留 [0.5a, 1.5a]；越大越宽松。尺寸筛选全部舍弃时恢复非边缘候选；边缘排除全部舍弃时恢复原输入。"
                 }),
                 "合并遮罩": ("BOOLEAN", {
                     "default": True,
@@ -119,7 +121,7 @@ class 孤海Seg次序过滤:
         
         return 0.0
     
-    def group_segments_by_x(self, segs_list: List, threshold: int) -> List[List]:
+    def group_segments_by_x(self, segs_list: List, threshold: float) -> List[List]:
         """根据X1坐标将分割区域分组"""
         if not segs_list:
             return []
@@ -185,6 +187,54 @@ class 孤海Seg次序过滤:
             result = list(reversed(result))
         
         return result
+
+    def get_largest_component_bbox(self, seg) -> tuple:
+        # masks 输入已计算最大连通区域，直接复用；Seg 输入按实际裁剪遮罩计算。
+        if hasattr(seg, 'sort_area'):
+            return self.get_segment_bbox(seg)
+        mask = self.mask_batch(self.get_segment_mask(seg))
+        x1, y1, x2, y2 = seg.crop_region
+        if x2 <= x1 or y2 <= y1:
+            return self.get_segment_bbox(seg)
+        if mask.shape[-2:] != (y2 - y1, x2 - x1):
+            mask = torch.nn.functional.interpolate(
+                mask.to(dtype=torch.float32).unsqueeze(1), size=(y2 - y1, x2 - x1),
+                mode='bilinear', align_corners=False
+            ).squeeze(1)
+        active = (mask > 0.1).any(dim=0).to(device='cpu', dtype=torch.uint8).numpy()
+        count, _, stats, _ = cv2.connectedComponentsWithStats(active, connectivity=8)
+        if count <= 1:
+            return self.get_segment_bbox(seg)
+        component = stats[1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])]
+        x, y, width, height = map(int, component[:4])
+        return (x1 + x, y1 + y, x1 + x + width, y1 + y + height)
+
+    def sort_top_bottom_left_right(self, segs_list: List, threshold: int, reverse_order: bool,
+                                  bottom_first: bool = False) -> List:
+        positions = [(seg, self.get_largest_component_bbox(seg)) for seg in segs_list]
+        heights = [bbox[3] - bbox[1] for _, bbox in positions
+                   if bbox[2] > bbox[0] and bbox[3] > bbox[1]]
+        threshold = sum(heights) / len(heights) * threshold / 100 if heights else 0.0
+        positions.sort(key=lambda item: item[1][1])
+        groups = []
+        current_group = []
+        top_sum = 0.0
+        for seg, bbox in positions:
+            top = bbox[1]
+            # 与当前行已收录遮罩最高点的平均 Y 比较，超过阈值才另起一行。
+            if current_group and top - top_sum / len(current_group) > threshold:
+                groups.append(current_group)
+                current_group = []
+                top_sum = 0.0
+            current_group.append((seg, bbox))
+            top_sum += top
+        if current_group:
+            groups.append(current_group)
+        if bottom_first:
+            groups.reverse()
+        result = [seg for group in groups
+                  for seg, _ in sorted(group, key=lambda item: item[1][0])]
+        return list(reversed(result)) if reverse_order else result
     
     @staticmethod
     def mask_batch(mask) -> torch.Tensor:
@@ -245,17 +295,20 @@ class 孤海Seg次序过滤:
             # 按高度排序，正序时从大到小
             sorted_segs = sorted(segs_list, key=lambda seg: self.get_segment_feature(seg, "高度大小"), reverse=reverse_sort)
         
-        elif 优先规则 == "左右上下":
-            # 新的分组排序逻辑
-            groups = self.group_segments_by_x(segs_list, 分组阈值)
-            sorted_segs = self.sort_groups_left_right_top_bottom(groups, not reverse_sort)
-            # 注意：这里not reverse_sort是因为我们的分组排序函数内部已经处理了反序逻辑
-        
-        elif 优先规则 == "左右下上":
-            # 新的分组排序逻辑
-            groups = self.group_segments_by_x(segs_list, 分组阈值)
-            sorted_segs = self.sort_groups_left_right_bottom_top(groups, not reverse_sort)
-            # 注意：这里not reverse_sort是因为我们的分组排序函数内部已经处理了反序逻辑
+        elif 优先规则 in ("左右上下", "左右下上"):
+            bboxes = [self.get_largest_component_bbox(seg) for seg in segs_list]
+            widths = [x2 - x1 for x1, y1, x2, y2 in bboxes if x2 > x1 and y2 > y1]
+            threshold = sum(widths) / len(widths) * 分组阈值 / 100 if widths else 0.0
+            groups = self.group_segments_by_x(segs_list, threshold)
+            if 优先规则 == "左右上下":
+                sorted_segs = self.sort_groups_left_right_top_bottom(groups, not reverse_sort)
+            else:
+                sorted_segs = self.sort_groups_left_right_bottom_top(groups, not reverse_sort)
+
+        elif 优先规则 in ("上下左右", "下上左右"):
+            sorted_segs = self.sort_top_bottom_left_right(
+                segs_list, 分组阈值, not reverse_sort, bottom_first=(优先规则 == "下上左右")
+            )
         
         else:
             # 默认不排序
@@ -317,8 +370,8 @@ class 孤海Seg次序过滤:
         bboxes = [self.get_white_bbox(seg, image_shape) for seg in segments]
         h, w = image_shape
         interior = [(seg, bbox) for seg, bbox in zip(segments, bboxes)
-                    if w / 15 < (bbox[0] + bbox[2]) / 2 < w * 14 / 15
-                    and h / 15 < (bbox[1] + bbox[3]) / 2 < h * 14 / 15]
+                    if w / 20 < (bbox[0] + bbox[2]) / 2 < w * 19 / 20
+                    and h / 20 < (bbox[1] + bbox[3]) / 2 < h * 19 / 20]
         if not interior:
             return segments
         input_count = len(segments)

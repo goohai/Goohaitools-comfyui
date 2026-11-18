@@ -3309,26 +3309,50 @@ function installMaskEditorHotkey() {
 }
 
 async function uploadSelectedImageForNode(node, file) {
-    const body = new FormData();
-    body.append("image", file);
-    body.append("type", "input");
-    body.append("overwrite", "false");
-    const res = await api.fetchApi("/upload/image", { method: "POST", body });
-    if (!res.ok) throw new Error(`\u4e0a\u4f20\u5931\u8d25: HTTP ${res.status}`);
-    const item = await res.json();
-    const value = `${item.subfolder ? `${item.subfolder}/` : ""}${item.name || item.filename} [input]`;
-    const imageWidget = findImageWidget(node);
-    if (!imageWidget) return;
-    imageWidget.value = value;
-    imageWidget.callback?.(value);
-    node.setDirtyCanvas(true, true);
-    app.graph?.change?.();
+    if (node._guhaiImageUploadPending) return;
+    // ComfyUI's isUploading flag replaces the image with a spinner. This
+    // uploader keeps the current preview until the crop controller swaps it.
+    node._guhaiImageUploadPending = true;
+    try {
+        const body = new FormData();
+        body.append("image", file);
+        body.append("type", "input");
+        body.append("overwrite", "false");
+        const res = await api.fetchApi("/upload/image", { method: "POST", body });
+        if (!res.ok) throw new Error(`\u4e0a\u4f20\u5931\u8d25: HTTP ${res.status}`);
+        const item = await res.json();
+        const value = `${item.subfolder ? `${item.subfolder}/` : ""}${item.name || item.filename} [input]`;
+        const imageWidget = findImageWidget(node);
+        if (!imageWidget) return;
+        addImageWidgetOption(imageWidget, value);
+        imageWidget.value = value;
+        imageWidget.callback?.(value);
+        node.setDirtyCanvas(true, true);
+        app.graph?.change?.();
+    } finally {
+        node._guhaiImageUploadPending = false;
+    }
 }
 
 function isImageDropFile(file) {
     if (!file) return false;
     if (String(file.type || "").toLowerCase().startsWith("image/")) return true;
     return /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|tiff?|webp)$/i.test(String(file.name || ""));
+}
+
+function installLoadImagePaste(node) {
+    const originalPaste = node.pasteFiles;
+    node.pasteFiles = async function (files) {
+        const file = Array.from(files).find(isImageDropFile);
+        if (!file) return originalPaste?.apply(this, arguments);
+        try {
+            // The stock uploader clears the preview and selects the clipboard
+            // filename before the server resolves its final, unique filename.
+            await uploadSelectedImageForNode(node, file);
+        } catch (err) {
+            alert(`\u4e0a\u4f20\u56fe\u50cf\u5931\u8d25: ${err?.message || err}`);
+        }
+    };
 }
 
 function getLoadImageGoohaiAtDropEvent(event) {
@@ -3553,7 +3577,10 @@ function initializeLoadImageNode(node, { floating = false } = {}) {
         restoreLoadImageState(node);
         installLoadImagePersistence(node);
         installImageWidgetPrewarm(node);
-        if (isLoadImageGoohaiNode(node)) installLoaderCrop(node);
+        if (isLoadImageGoohaiNode(node)) {
+            installLoaderCrop(node);
+            installLoadImagePaste(node);
+        }
         if (floating) {
             hideBulkyWidgets(node);
             installFloatingButtons(node);

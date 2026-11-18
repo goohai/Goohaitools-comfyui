@@ -1,5 +1,7 @@
 import { app } from "../../../scripts/app.js";
 
+const DEFAULT_ACCENT_COLOR = "#4c758a";
+
 let _globalIgCounter = 0;
 const _graphChangeListeners = new WeakMap();
 
@@ -37,8 +39,11 @@ app.registerExtension({
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
-            this.color   = this.color   || "#4E464A";
-            this.bgcolor = this.bgcolor || "#4E464A";
+            // ComfyUI applies its native light-theme adjustment to node colors.
+            this.color   = this.color   || "#4d6574";
+            this.bgcolor = this.bgcolor || "#395160";
+            this.properties = this.properties || {};
+            this.properties.guhai_ig_name_color ??= DEFAULT_ACCENT_COLOR;
             this.size = [400, this.size[1]];
             buildIgnoreGroupsUI(this);
         };
@@ -78,7 +83,7 @@ function buildIgnoreGroupsUI(node) {
     let mode      = "default";
     let active    = null;
     let activeSet = null;
-    let nameColor = null;
+    let nameColor = node.properties?.guhai_ig_name_color || DEFAULT_ACCENT_COLOR;
     let igDisable = false;
     let sortOrder     = "position";
     let colorFilter   = "none";
@@ -117,7 +122,8 @@ function buildIgnoreGroupsUI(node) {
         mode       = (node.properties && node.properties.guhai_ig_mode)        || "default";
         active     = (node.properties && node.properties.guhai_ig_active)      || null;
         activeSet  = (node.properties && node.properties.guhai_ig_active_set)  || null;
-        nameColor  = (node.properties && node.properties.guhai_ig_name_color)  || null;
+        nameColor  = (node.properties && node.properties.guhai_ig_name_color)  || DEFAULT_ACCENT_COLOR;
+        node.properties.guhai_ig_name_color = nameColor;
         igDisable  = (node.properties && node.properties.guhai_ig_disable)     || false;
         sortOrder  = (node.properties && node.properties.guhai_ig_sort_order)  || "position";
         colorFilter= (node.properties && node.properties.guhai_ig_color_filter)|| "none";
@@ -177,6 +183,14 @@ function buildIgnoreGroupsUI(node) {
         const knobOnL  = Math.max(knobOffL, tW - kD - knobPad - 3);
 
         return `
+            .${_uid}, .${_uid}-settings {
+                --guhai-ig-toggle-off: #606060;
+                --guhai-ig-knob-off: #808080;
+            }
+            :root:not(.dark-theme) .${_uid}, :root:not(.dark-theme) .${_uid}-settings {
+                --guhai-ig-toggle-off: #c9c9c9;
+                --guhai-ig-knob-off: #f2f2f2;
+            }
             .${_uid} {
                 position: relative; width: 100%; box-sizing: border-box;
                 overflow: hidden; user-select: none;
@@ -206,13 +220,14 @@ function buildIgnoreGroupsUI(node) {
                 height: ${rH}px;
                 margin: 0 ${pX}px ${ROW_GAP}px;
                 padding: 0 ${rPR}px 0 ${rPL}px;
-                background: #2B2F38; border: 1px solid #6E7581;
+                background: var(--component-node-widget-background, var(--comfy-input-bg));
+                border: 1px solid var(--border-color);
                 border-radius: ${bR}px;
                 cursor: pointer; box-sizing: border-box;
                 transition: border-color .15s;
                 pointer-events: auto;
             }
-            .${_uid} .guhai-ig-row:hover { border-color: #8E95A1; }
+            .${_uid} .guhai-ig-row:hover { border-color: var(--input-text); }
             .${_uid} .guhai-ig-row:last-child { margin-bottom: 5px; }
             .${_uid} .guhai-ig-label {
                 font-weight: bold; font-size: ${fS}px; flex: 1;
@@ -221,12 +236,12 @@ function buildIgnoreGroupsUI(node) {
             }
             .${_uid} .guhai-ig-toggle {
                 width: ${tW}px; height: ${tH}px; border-radius: ${tH / 2}px;
-                background: #606060; position: relative; flex-shrink: 0;
+                background: var(--guhai-ig-toggle-off); position: relative; flex-shrink: 0;
                 transition: background .2s ease, box-shadow .2s ease;
             }
             .${_uid} .guhai-ig-knob {
                 width: ${kD}px; height: ${kD}px; border-radius: 50%;
-                background: rgb(128,128,128);
+                background: var(--guhai-ig-knob-off);
                 position: absolute; top: ${knobPad}px; left: ${knobOffL}px;
                 transition: left .2s ease, background .2s ease;
                 box-shadow: 0 1px 4px rgba(0,0,0,0.3);
@@ -235,6 +250,9 @@ function buildIgnoreGroupsUI(node) {
                 left: ${knobOnL}px;
                 background: rgb(230,230,230);
             }
+            .${_uid}-settings { --guhai-ig-menu-bg: #2a2a2a; }
+            :root:not(.dark-theme) .${_uid}-settings { --guhai-ig-menu-bg: #d1b5d2; }
+            .${_uid}-settings input::placeholder { color: var(--descrip-text); }
         `;
     }
 
@@ -493,15 +511,6 @@ function buildIgnoreGroupsUI(node) {
     }
 
 
-    function hexToRgba(hex, alpha) {
-        if (!hex || hex.length < 7) return `rgba(120,120,120,${alpha})`;
-        const r = parseInt(hex.slice(1, 3), 16);
-        const g = parseInt(hex.slice(3, 5), 16);
-        const b = parseInt(hex.slice(5, 7), 16);
-        return `rgba(${r},${g},${b},${alpha})`;
-    }
-
-
     const gearSVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <circle cx="12" cy="12" r="3" fill="rgba(120,120,120,0.3)" stroke="rgba(153,153,153,0.6)" stroke-width="1"/>
         <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58z"
@@ -552,7 +561,7 @@ function buildIgnoreGroupsUI(node) {
 
     function buildStatefulSig() {
         const list = visible();
-        const effectiveColor = nameColor || "#a89961";
+        const effectiveColor = nameColor;
         let sig = list.map(g => {
             const isOn = getGroupState(g) !== false;
             return g.title + (isOn ? ":1" : ":0");
@@ -567,7 +576,7 @@ function buildIgnoreGroupsUI(node) {
         _lastBuildSig = sig;
 
         const list = visible();
-        const effectiveColor = nameColor || "#a89961";
+        const effectiveColor = nameColor;
 
         rootEl.innerHTML = "";
         /* ── 优化：移除了此处的 wheel 监听器重复绑定 ── */
@@ -611,8 +620,8 @@ function buildIgnoreGroupsUI(node) {
 
                 const toggle = document.createElement("div");
                 toggle.className = "guhai-ig-toggle" + (isOn ? " on" : "");
-                toggle.style.background = isOn ? effectiveColor : "#606060";
-                toggle.style.boxShadow = isOn ? "0 0 8px " + hexToRgba(effectiveColor, 0.35) : "none";
+                if (isOn) toggle.style.background = effectiveColor;
+                toggle.style.boxShadow = isOn ? `0 0 8px color-mix(in srgb, ${effectiveColor} 35%, transparent)` : "none";
 
                 const knob = document.createElement("div");
                 knob.className = "guhai-ig-knob";
@@ -722,15 +731,16 @@ function buildIgnoreGroupsUI(node) {
 
         const pop = document.createElement("div");
         pop.id = "guhai_ig_pop";
+        pop.className = _uid + "-settings";
         Object.assign(pop.style, {
             position: "fixed",
             left: Math.min(x, innerWidth  - 280) + "px",
             top:  Math.min(y, innerHeight - 620) + "px",
-            background: "#2a2a2a", border: "1px solid #555",
+            background: "var(--guhai-ig-menu-bg)", border: "1px solid var(--border-color)",
             borderRadius: "8px", padding: "14px 18px",
             zIndex: "99999", minWidth: "250px",
             boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
-            color: "#e0e0e0", fontFamily: "inherit",
+            color: "var(--input-text)", fontFamily: "inherit",
         });
         pop.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
 
@@ -757,7 +767,6 @@ function buildIgnoreGroupsUI(node) {
         function applyAll() {
             filter      = fInput.value;
             colorFilter = cFilter;
-            nameColor   = cInput.value || null;
             igDisable   = dRadioDisable.checked;
             sortOrder   = sSelect.value;
             const newMode = mSelect.value;
@@ -826,7 +835,7 @@ function buildIgnoreGroupsUI(node) {
         titleEl.textContent = "🎮  忽略多组_孤海 设置";
         Object.assign(titleEl.style, {
             fontSize: "15px", fontWeight: "bold", marginBottom: "14px",
-            color: "#e0e0e0", borderBottom: "1px solid #444", paddingBottom: "8px",
+            color: "var(--input-text)", borderBottom: "1px solid var(--border-color)", paddingBottom: "8px",
         });
         pop.appendChild(titleEl);
 
@@ -865,8 +874,8 @@ function buildIgnoreGroupsUI(node) {
         fInput.type = "text"; fInput.value = filter; fInput.placeholder = "留空 = 显示所有组";
         Object.assign(fInput.style, {
             width: "100%", padding: "5px 8px", fontSize: "13px",
-            background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
-            color: "#e0e0e0", outline: "none", boxSizing: "border-box", marginBottom: "14px",
+            background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
+            color: "var(--input-text)", outline: "none", boxSizing: "border-box", marginBottom: "14px",
         });
         pop.appendChild(fInput);
         let filterTimer = null;
@@ -888,20 +897,20 @@ function buildIgnoreGroupsUI(node) {
         const cdTrigger = document.createElement("div");
         Object.assign(cdTrigger.style, {
             width: "100%", padding: "5px 8px", fontSize: "13px",
-            background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
-            color: "#e0e0e0", boxSizing: "border-box",
+            background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
+            color: "var(--input-text)", boxSizing: "border-box",
             cursor: "pointer", display: "flex", alignItems: "center", gap: "6px", userSelect: "none",
         });
         const cdColorRect = document.createElement("span");
         Object.assign(cdColorRect.style, {
             display: "inline-block", width: "44px", height: "14px",
-            borderRadius: "2px", border: "1px solid #555", flexShrink: "0",
+            borderRadius: "2px", border: "1px solid var(--border-color)", flexShrink: "0",
         });
         const cdColorText = document.createElement("span");
         Object.assign(cdColorText.style, { flex: "1" });
         const cdArrow = document.createElement("span");
         cdArrow.textContent = "\u25BE";
-        Object.assign(cdArrow.style, { marginLeft: "auto", fontSize: "11px", color: "#888" });
+        Object.assign(cdArrow.style, { marginLeft: "auto", fontSize: "11px", color: "var(--descrip-text)" });
         cdTrigger.appendChild(cdColorRect); cdTrigger.appendChild(cdColorText); cdTrigger.appendChild(cdArrow);
 
         function updateColorPreview() {
@@ -928,7 +937,7 @@ function buildIgnoreGroupsUI(node) {
             cdPanel = document.createElement("div");
             Object.assign(cdPanel.style, {
                 position: "absolute", left: "0", right: "0", top: "calc(100% + 2px)",
-                background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
+                background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
                 zIndex: "100001", maxHeight: "200px", overflowY: "auto",
                 boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
             });
@@ -939,19 +948,19 @@ function buildIgnoreGroupsUI(node) {
                     display: "flex", alignItems: "center", gap: "8px",
                     padding: "5px 8px", cursor: "pointer", fontSize: "13px", transition: "background 0.15s",
                 });
-                item.addEventListener("mouseenter", () => { item.style.background = "#3a3a3a"; });
+                item.addEventListener("mouseenter", () => { item.style.background = "var(--border-color)"; });
                 item.addEventListener("mouseleave", () => { item.style.background = "transparent"; });
                 if (!isNone) {
                     const rect = document.createElement("span");
                     Object.assign(rect.style, {
                         display: "inline-block", width: "44px", height: "16px",
-                        borderRadius: "2px", border: "1px solid #555",
+                        borderRadius: "2px", border: "1px solid var(--border-color)",
                         background: isTransparent ? "transparent" : bgColor, flexShrink: "0",
                     });
                     item.appendChild(rect);
                 }
                 const txt = document.createElement("span");
-                txt.textContent = label; txt.style.color = "#fff"; item.appendChild(txt);
+                txt.textContent = label; txt.style.color = "var(--input-text)"; item.appendChild(txt);
                 item.addEventListener("click", (e) => {
                     e.stopPropagation(); cFilter = value; updateColorPreview();
                     if (cdPanel) { cdPanel.remove(); cdPanel = null; } applyAll();
@@ -984,8 +993,8 @@ function buildIgnoreGroupsUI(node) {
         const mSelect = document.createElement("select");
         Object.assign(mSelect.style, {
             width: "100%", padding: "5px 8px", fontSize: "13px",
-            background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
-            color: "#e0e0e0", outline: "none", boxSizing: "border-box", marginBottom: "14px",
+            background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
+            color: "var(--input-text)", outline: "none", boxSizing: "border-box", marginBottom: "14px",
         });
         [["default","默认"],["always_one","始终开启1个"],["at_most_one","最多开启1个"]].forEach(([val, txt]) => {
             const opt = document.createElement("option"); opt.value = val; opt.textContent = txt; mSelect.appendChild(opt);
@@ -1001,8 +1010,8 @@ function buildIgnoreGroupsUI(node) {
         const sSelect = document.createElement("select");
         Object.assign(sSelect.style, {
             width: "100%", padding: "5px 8px", fontSize: "13px",
-            background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
-            color: "#e0e0e0", outline: "none", boxSizing: "border-box", marginBottom: "14px",
+            background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
+            color: "var(--input-text)", outline: "none", boxSizing: "border-box", marginBottom: "14px",
         });
         [["position","按位置"],["alphabet","按首字母"]].forEach(([val, txt]) => {
             const opt = document.createElement("option"); opt.value = val; opt.textContent = txt; sSelect.appendChild(opt);
@@ -1025,12 +1034,12 @@ function buildIgnoreGroupsUI(node) {
         scaleInput.step = "0.1";
         scaleInput.value = String(uiScale);
         Object.assign(scaleInput.style, {
-            flex: "1", height: "4px", appearance: "none", background: "#555",
+            flex: "1", height: "4px", appearance: "none", background: "var(--border-color)",
             borderRadius: "2px", outline: "none", cursor: "pointer",
         });
         const scaleVal = document.createElement("span");
         scaleVal.textContent = uiScale.toFixed(1) + "x";
-        Object.assign(scaleVal.style, { minWidth: "36px", fontSize: "12px", color: "#aaa", textAlign: "right" });
+        Object.assign(scaleVal.style, { minWidth: "36px", fontSize: "12px", color: "var(--descrip-text)", textAlign: "right" });
         scaleRow.appendChild(scaleInput);
         scaleRow.appendChild(scaleVal);
         pop.appendChild(scaleRow);
@@ -1049,25 +1058,26 @@ function buildIgnoreGroupsUI(node) {
         Object.assign(colorRow.style, { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" });
 
         const cInput = document.createElement("input");
-        cInput.type = "color"; cInput.value = nameColor || "#a89961";
+        const initialColor = nameColor;
+        cInput.type = "color"; cInput.value = initialColor;
         Object.assign(cInput.style, {
             width: "36px", height: "28px", padding: "0",
-            border: "1px solid #555", borderRadius: "4px", background: "#1a1a1a", cursor: "pointer",
+            border: "1px solid var(--border-color)", borderRadius: "4px", background: "var(--comfy-input-bg)", cursor: "pointer",
         });
         colorRow.appendChild(cInput);
 
         const cHex = document.createElement("input");
-        cHex.type = "text"; cHex.value = nameColor || "#a89961";
+        cHex.type = "text"; cHex.value = initialColor;
         Object.assign(cHex.style, {
             flex: "1", padding: "5px 8px", fontSize: "13px",
-            background: "#1a1a1a", border: "1px solid #555", borderRadius: "4px",
-            color: "#e0e0e0", outline: "none", boxSizing: "border-box",
+            background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
+            color: "var(--input-text)", outline: "none", boxSizing: "border-box",
         });
         colorRow.appendChild(cHex);
 
-        cInput.addEventListener("input", () => { cHex.value = cInput.value; applyAll(); });
+        cInput.addEventListener("input", () => { nameColor = cInput.value; cHex.value = cInput.value; applyAll(); });
         cHex.addEventListener("input", () => {
-            if (/^#[0-9a-fA-F]{6}$/.test(cHex.value)) { cInput.value = cHex.value; applyAll(); }
+            if (/^#[0-9a-fA-F]{6}$/.test(cHex.value)) { nameColor = cHex.value; cInput.value = cHex.value; applyAll(); }
         });
         pop.appendChild(colorRow);
 

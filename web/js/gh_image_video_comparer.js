@@ -12,6 +12,7 @@ const VIEW_MODES = [
 ];
 const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 const LABEL_HEIGHT = 20;
+const LABEL_FADE_MS = 1000;
 const HORIZONTAL_SPLIT_GAP_PX = 1;
 const VERTICAL_SPLIT_GAP_PX = 2;
 const SLIDE_DIVIDER_WIDTH_PX = 0.5;
@@ -1111,24 +1112,24 @@ function drawCanvasPreview(state, geometry = measureComparer(state)) {
         // right so each value follows the image it describes.
         const singleImageThreshold = 1 / 3;
         if (state.position <= singleImageThreshold) {
-            state.dimensionLabels = [{ text: ta, rect: slideLabelRectB, align: "right", y: labelY }];
+            state.dimensionLabels = [{ key: "a", text: ta, rect: slideLabelRectB, align: "right", y: labelY }];
         } else if (state.position >= 1 - singleImageThreshold) {
-            state.dimensionLabels = [{ text: tb, rect: slideLabelRectA, align: "left", y: labelY }];
+            state.dimensionLabels = [{ key: "b", text: tb, rect: slideLabelRectA, align: "left", y: labelY }];
         } else {
             state.dimensionLabels = [
-                { text: tb, rect: slideLabelRectA, align: "left", y: labelY },
-                { text: ta, rect: slideLabelRectB, align: "right", y: labelY },
+                { key: "b", text: tb, rect: slideLabelRectA, align: "left", y: labelY },
+                { key: "a", text: ta, rect: slideLabelRectB, align: "right", y: labelY },
             ];
         }
     } else if (layout === "horizontal") {
         state.dimensionLabels = [
-            { text: ta, rect: rectA, align: "center", y: rectA.y + rectA.h + 2 },
-            { text: tb, rect: rectB, align: "center", y: rectB.y + rectB.h + 2 },
+            { key: "a", text: ta, rect: rectA, align: "center", y: rectA.y + rectA.h + 2 },
+            { key: "b", text: tb, rect: rectB, align: "center", y: rectB.y + rectB.h + 2 },
         ];
     } else {
         state.dimensionLabels = [
-            { text: ta, rect: rectA, align: "center", y: rectA.y + rectA.h + 2 },
-            { text: tb, rect: rectB, align: "center", y: rectB.y + rectB.h + 2 },
+            { key: "a", text: ta, rect: rectA, align: "center", y: rectA.y + rectA.h + 2 },
+            { key: "b", text: tb, rect: rectB, align: "center", y: rectB.y + rectB.h + 2 },
         ];
     }
     drawDimensionLabels(state, geometry);
@@ -1142,11 +1143,33 @@ function drawDimensionLabels(state, geometry = measureComparer(state)) {
     // add visual noise. Restore them as soon as the split view returns to 1x.
     const splitViewZoomed = effectiveView(state) !== "slide" && (Number(state.compareZoom) || 1) > 1.0001;
     const labels = splitViewZoomed ? [] : (state.dimensionLabels || []);
-    if (!geometry.visible || !labels.length) {
+    if (!geometry.visible) {
         if (svg.style.display !== "none") svg.style.display = "none";
         state.labelRenderKey = null;
+        state.dimensionLabelFades = {};
         return;
     }
+
+    state.dimensionLabelFades ??= {};
+    const now = performance.now();
+    const fadingLabels = [];
+    let animating = false;
+    for (const key of ["b", "a"]) {
+        const label = labels.find((label) => label.key === key);
+        const fade = state.dimensionLabelFades[key] ??= { from: 0, target: 0, started: now };
+        const progress = Math.min(1, (now - fade.started) / LABEL_FADE_MS);
+        const opacity = fade.from + (fade.target - fade.from) * progress;
+        const target = Number(Boolean(label?.text));
+        if (fade.target !== target) {
+            fade.from = opacity;
+            fade.target = target;
+            fade.started = now;
+        }
+        if (label) fade.label = label;
+        animating ||= opacity !== target;
+        if (fade.label) fadingLabels.push({ ...fade.label, opacity });
+    }
+    if (animating) scheduleDimensionLabelRefresh(state);
 
     // This SVG lives directly under document.body, outside LiteGraph's
     // transformed DOM tree. Coordinates and font sizes are expressed in final
@@ -1158,7 +1181,7 @@ function drawDimensionLabels(state, geometry = measureComparer(state)) {
     const labelKey = [
         stageRect.left, stageRect.top, stageRect.width, stageRect.height, width, height,
         window.innerWidth, window.innerHeight,
-        fontSize, ...labels.map((label) => `${label.text}|${label.align}|${label.rect?.x}|${label.rect?.w}|${label.y}`),
+        fontSize, ...fadingLabels.map((label) => `${label.key}|${label.text}|${label.align}|${label.rect?.x}|${label.rect?.w}|${label.y}|${label.opacity}`),
     ].join(";");
     if (state.labelRenderKey === labelKey && svg.style.display !== "none") return;
     state.labelRenderKey = labelKey;
@@ -1170,10 +1193,9 @@ function drawDimensionLabels(state, geometry = measureComparer(state)) {
         svg.setAttribute("width", String(window.innerWidth));
         svg.setAttribute("height", String(window.innerHeight));
     }
-    state.labelTextElements ??= [];
-    for (let index = 0; index < labels.length; index++) {
-        const label = labels[index];
-        let text = state.labelTextElements[index];
+    state.labelTextElements ??= {};
+    for (const label of fadingLabels) {
+        let text = state.labelTextElements[label.key];
         if (!text) {
             text = document.createElementNS("http://www.w3.org/2000/svg", "text");
             text.setAttribute("fill", "#aeb3bc");
@@ -1181,19 +1203,25 @@ function drawDimensionLabels(state, geometry = measureComparer(state)) {
             text.setAttribute("dominant-baseline", "hanging");
             text.setAttribute("text-rendering", "geometricPrecision");
             svg.appendChild(text);
-            state.labelTextElements[index] = text;
+            state.labelTextElements[label.key] = text;
         }
         const centerX = label.rect.x + label.rect.w / 2;
         const localX = label.align === "left" ? label.rect.x : label.align === "right" ? label.rect.x + label.rect.w : centerX;
         const screenX = stageRect.left + Math.max(0, Math.min(width, localX)) * scaleX;
         const screenY = stageRect.top + label.y * scaleY;
+        text.setAttribute("opacity", String(label.opacity));
         text.setAttribute("x", String(screenX));
         text.setAttribute("y", String(screenY));
         text.setAttribute("font-size", String(fontSize));
         text.setAttribute("text-anchor", label.align === "left" ? "start" : label.align === "right" ? "end" : "middle");
         if (text.textContent !== label.text) text.textContent = label.text;
     }
-    while (state.labelTextElements.length > labels.length) state.labelTextElements.pop()?.remove();
+    for (const [key, text] of Object.entries(state.labelTextElements)) {
+        if (!fadingLabels.some((label) => label.key === key)) {
+            text.remove();
+            delete state.labelTextElements[key];
+        }
+    }
 }
 
 function scheduleDimensionLabelRefresh(state) {

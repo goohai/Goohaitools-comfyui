@@ -109,6 +109,26 @@ def _selected_output_language(language: str, user_prompt: str) -> str:
     return _language_override_text(language, user_prompt)
 
 
+def _final_language_directive(selected: str) -> str:
+    if selected == "Chinese":
+        return (
+            "\n\nFINAL OUTPUT LANGUAGE — 中文：`rewritten_prompt`中的描述性正文必须全部使用中文，"
+            "不要沿用系统提示词、skill、示例或用户输入中的英文描述。"
+            "保持完整的细节和描述长度，不要为了使用中文而缩写或概括。"
+            "仅专有名词、标准单位和必须出现在画面中的原文可以保留原样；"
+            "图像引用标签及JSON字段名保持不变。只输出要求的JSON，不要解释。"
+        )
+    return (
+        "\n\nFINAL OUTPUT LANGUAGE — English: Write all descriptive prose in "
+        "`rewritten_prompt` entirely in English, even when the system prompt, skill, "
+        "examples, user request, or image text uses Chinese. Preserve the full detail "
+        "and descriptive length; do not summarize or shorten the prompt to meet this "
+        "language requirement. Only exact text required to appear in the image may "
+        "keep its original script. Keep image reference tags and JSON keys unchanged. "
+        "Return only the required JSON, without explanation."
+    )
+
+
 def _wrap_user_prompt_for_language(
     user_prompt: str,
     language: str,
@@ -167,28 +187,6 @@ def _wrap_user_prompt_for_language(
             "Keep genuine scene text such as signs, posters, packaging, screens, labels, "
             "license plates, and clothing text when it belongs to the depicted subject."
         )
-    reverse_language_directive = ""
-    if reverse_mode:
-        if selected == "Chinese":
-            language_rule = (
-                "硬性要求：`rewritten_prompt`字段中的描述性文字必须全部使用中文。"
-                "不要因为系统提示词、模型名称或参考图中的英文而输出英文描述。"
-                "只有画面中真实存在的文字可以保留原文。"
-            )
-        else:
-            language_rule = (
-                "STRICT REQUIREMENT: Every descriptive word in the `rewritten_prompt` "
-                "field must be written in English. Do not output Chinese descriptive "
-                "prose because of the system prompt, model name, or image text."
-            )
-        reverse_language_directive = (
-            "\n\nFINAL REVERSE LANGUAGE LOCK: Write every descriptive word in "
-            f"{selected}. This lock is absolute. "
-            "Only exact text that is visibly part of the depicted scene may remain in "
-            "its original script. Do not use English for descriptive prose when Chinese "
-            "is selected, and do not use Chinese for descriptive prose when English is selected. "
-            + language_rule
-        )
     return (
         "OUTPUT LANGUAGE DIRECTIVE (highest priority for this user turn): "
         f"Write the descriptive prose in rewritten_prompt entirely in {selected}. "
@@ -202,7 +200,7 @@ def _wrap_user_prompt_for_language(
         + image_reference_directive
         + reverse_directive
         + transparency_final_directive
-        + reverse_language_directive
+        + _final_language_directive(selected)
     )
 
 
@@ -912,6 +910,9 @@ class QwenImageRuntime:
                     "type": "image_url",
                     "image_url": {"url": _image_data_url(image, image_max_size)},
                 })
+            if vision_mode:
+                selected = "Chinese" if (reverse_mode and output_language == "自动") else _selected_output_language(output_language, original_user_prompt)
+                content.append({"type": "text", "text": _final_language_directive(selected)})
             encoded_at = time.perf_counter()
             messages = [
                 {"role": "system", "content": system_prompt},
