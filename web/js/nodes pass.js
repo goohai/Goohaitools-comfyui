@@ -44,6 +44,7 @@ app.registerExtension({
             this.bgcolor = this.bgcolor || "#395160";
             this.properties = this.properties || {};
             this.properties.guhai_ig_name_color ??= DEFAULT_ACCENT_COLOR;
+            this.properties.guhai_ig_theme_mode ??= "dark";
             this.size = [400, this.size[1]];
             buildIgnoreGroupsUI(this);
         };
@@ -84,6 +85,7 @@ function buildIgnoreGroupsUI(node) {
     let active    = null;
     let activeSet = null;
     let nameColor = node.properties?.guhai_ig_name_color || DEFAULT_ACCENT_COLOR;
+    let themeMode = node.properties?.guhai_ig_theme_mode === "light" ? "light" : "dark";
     let igDisable = false;
     let sortOrder     = "position";
     let colorFilter   = "none";
@@ -109,6 +111,7 @@ function buildIgnoreGroupsUI(node) {
         node.properties.guhai_ig_active      = active;
         node.properties.guhai_ig_active_set  = activeSet;
         node.properties.guhai_ig_name_color  = nameColor;
+        node.properties.guhai_ig_theme_mode  = themeMode;
         node.properties.guhai_ig_disable     = igDisable;
         node.properties.guhai_ig_sort_order  = sortOrder;
         node.properties.guhai_ig_color_filter = colorFilter;
@@ -124,6 +127,7 @@ function buildIgnoreGroupsUI(node) {
         activeSet  = (node.properties && node.properties.guhai_ig_active_set)  || null;
         nameColor  = (node.properties && node.properties.guhai_ig_name_color)  || DEFAULT_ACCENT_COLOR;
         node.properties.guhai_ig_name_color = nameColor;
+        themeMode = node.properties?.guhai_ig_theme_mode === "light" ? "light" : "dark";
         igDisable  = (node.properties && node.properties.guhai_ig_disable)     || false;
         sortOrder  = (node.properties && node.properties.guhai_ig_sort_order)  || "position";
         colorFilter= (node.properties && node.properties.guhai_ig_color_filter)|| "none";
@@ -165,6 +169,7 @@ function buildIgnoreGroupsUI(node) {
 
 
     let _lastAppliedScale = -1;
+    let _lastAppliedTheme = null;
 
     function buildScopedCSS() {
         const rH  = S(BASE_ROW_H);
@@ -184,12 +189,8 @@ function buildIgnoreGroupsUI(node) {
 
         return `
             .${_uid}, .${_uid}-settings {
-                --guhai-ig-toggle-off: #606060;
-                --guhai-ig-knob-off: #808080;
-            }
-            :root:not(.dark-theme) .${_uid}, :root:not(.dark-theme) .${_uid}-settings {
-                --guhai-ig-toggle-off: #c9c9c9;
-                --guhai-ig-knob-off: #f2f2f2;
+                --guhai-ig-toggle-off: ${themeMode === "light" ? "#c9c9c9" : "#606060"};
+                --guhai-ig-knob-off: ${themeMode === "light" ? "#f2f2f2" : "#808080"};
             }
             .${_uid} {
                 position: relative; width: 100%; box-sizing: border-box;
@@ -250,16 +251,23 @@ function buildIgnoreGroupsUI(node) {
                 left: ${knobOnL}px;
                 background: rgb(230,230,230);
             }
-            .${_uid}-settings { --guhai-ig-menu-bg: #2a2a2a; }
-            :root:not(.dark-theme) .${_uid}-settings { --guhai-ig-menu-bg: #d1b5d2; }
+            .${_uid}-settings {
+                color-scheme: ${themeMode};
+                --guhai-ig-menu-bg: ${themeMode === "light" ? "#d1b5d2" : "#2a2a2a"};
+                --comfy-input-bg: ${themeMode === "light" ? "#c9c9c9" : "#1a1a1a"};
+                --input-text: ${themeMode === "light" ? "#222" : "#e0e0e0"};
+                --border-color: ${themeMode === "light" ? "#888" : "#555"};
+                --descrip-text: ${themeMode === "light" ? "#666" : "#aaa"};
+            }
             .${_uid}-settings input::placeholder { color: var(--descrip-text); }
         `;
     }
 
     function updateDynamicStyles() {
         let s = document.getElementById(_styleId);
-        if (s && Math.abs(_lastAppliedScale - uiScale) < 0.001) return;
+        if (s && Math.abs(_lastAppliedScale - uiScale) < 0.001 && _lastAppliedTheme === themeMode) return;
         _lastAppliedScale = uiScale;
+        _lastAppliedTheme = themeMode;
         if (!s) {
             s = document.createElement("style");
             s.id = _styleId;
@@ -769,6 +777,7 @@ function buildIgnoreGroupsUI(node) {
             colorFilter = cFilter;
             igDisable   = dRadioDisable.checked;
             sortOrder   = sSelect.value;
+            themeMode   = themeLight.checked ? "light" : "dark";
             const newMode = mSelect.value;
             const newScale = parseFloat(scaleInput.value) || 1.0;
 
@@ -1051,7 +1060,28 @@ function buildIgnoreGroupsUI(node) {
 
         const tcLabel = document.createElement("div");
         tcLabel.textContent = "主题颜色";
-        Object.assign(tcLabel.style, { fontSize: "13px", fontWeight: "bold", marginBottom: "4px" });
+        Object.assign(tcLabel.style, {
+            display: "flex", alignItems: "center", gap: "12px",
+            fontSize: "13px", fontWeight: "bold", marginBottom: "4px",
+        });
+        const themeDark = document.createElement("input");
+        const themeLight = document.createElement("input");
+        [[themeDark, "dark", "深色"], [themeLight, "light", "浅色"]].forEach(([radio, value, text]) => {
+            radio.type = "radio";
+            radio.name = _uid + "_theme_mode";
+            radio.value = value;
+            radio.checked = themeMode === value;
+            radio.style.cursor = "pointer";
+            const label = document.createElement("label");
+            Object.assign(label.style, {
+                display: "flex", alignItems: "center", gap: "4px",
+                fontWeight: "normal", cursor: "pointer",
+            });
+            label.appendChild(radio);
+            label.appendChild(document.createTextNode(text));
+            tcLabel.appendChild(label);
+            radio.addEventListener("change", applyAll);
+        });
         pop.appendChild(tcLabel);
 
         const colorRow = document.createElement("div");
