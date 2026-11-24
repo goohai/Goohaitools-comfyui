@@ -88,7 +88,9 @@ function buildIgnoreGroupsUI(node) {
     let themeMode = node.properties?.guhai_ig_theme_mode === "light" ? "light" : "dark";
     let igDisable = false;
     let sortOrder     = "position";
-    let colorFilter   = "none";
+    let selectedGroups = node.properties?.guhai_ig_selected_groups == null
+        ? null : new Set(node.properties.guhai_ig_selected_groups);
+    let updateQuickFilter = null;
     let uiScale       = 1.0;
     let childSelections = node.properties?.guhai_ig_child_selections || {};
 
@@ -100,7 +102,6 @@ function buildIgnoreGroupsUI(node) {
         if (node.properties.guhai_ig_name_color  != null) nameColor = node.properties.guhai_ig_name_color;
         if (node.properties.guhai_ig_disable     != null) igDisable = !!node.properties.guhai_ig_disable;
         if (node.properties.guhai_ig_sort_order  != null) sortOrder   = node.properties.guhai_ig_sort_order;
-        if (node.properties.guhai_ig_color_filter!= null) colorFilter = node.properties.guhai_ig_color_filter;
         if (node.properties.guhai_ig_ui_scale    != null) uiScale    = Number(node.properties.guhai_ig_ui_scale) || 1.0;
     }
 
@@ -114,7 +115,8 @@ function buildIgnoreGroupsUI(node) {
         node.properties.guhai_ig_theme_mode  = themeMode;
         node.properties.guhai_ig_disable     = igDisable;
         node.properties.guhai_ig_sort_order  = sortOrder;
-        node.properties.guhai_ig_color_filter = colorFilter;
+        delete node.properties.guhai_ig_color_filter;
+        if (selectedGroups !== null) node.properties.guhai_ig_selected_groups = [...selectedGroups];
         node.properties.guhai_ig_ui_scale    = uiScale;
         delete node.properties.guhai_ig_paused_groups;
         node.properties.guhai_ig_child_selections = childSelections;
@@ -130,7 +132,8 @@ function buildIgnoreGroupsUI(node) {
         themeMode = node.properties?.guhai_ig_theme_mode === "light" ? "light" : "dark";
         igDisable  = (node.properties && node.properties.guhai_ig_disable)     || false;
         sortOrder  = (node.properties && node.properties.guhai_ig_sort_order)  || "position";
-        colorFilter= (node.properties && node.properties.guhai_ig_color_filter)|| "none";
+        selectedGroups = node.properties?.guhai_ig_selected_groups == null
+            ? null : new Set(node.properties.guhai_ig_selected_groups);
         uiScale    = (node.properties && node.properties.guhai_ig_ui_scale)    || 1.0;
         childSelections = node.properties?.guhai_ig_child_selections || {};
         lastSig = "";
@@ -253,7 +256,10 @@ function buildIgnoreGroupsUI(node) {
             }
             .${_uid}-settings {
                 color-scheme: ${themeMode};
-                --guhai-ig-menu-bg: ${themeMode === "light" ? "#d1b5d2" : "#2a2a2a"};
+                --guhai-ig-menu-bg: ${themeMode === "light" ? "rgba(209,181,210,0.5)" : "rgba(42,42,42,0.5)"};
+                --guhai-ig-select-all-bg: ${themeMode === "light" ? "#c3dce0" : "#263f48"};
+                --guhai-ig-list-hover: ${themeMode === "light" ? "#d4e6e9" : "#20333b"};
+                --guhai-ig-list-divider: ${themeMode === "light" ? "#98bec5" : "#3b6570"};
                 --comfy-input-bg: ${themeMode === "light" ? "#c9c9c9" : "#1a1a1a"};
                 --input-text: ${themeMode === "light" ? "#222" : "#e0e0e0"};
                 --border-color: ${themeMode === "light" ? "#888" : "#555"};
@@ -300,22 +306,6 @@ function buildIgnoreGroupsUI(node) {
         return [p[0], p[1], s[0], s[1]];
     }
 
-    function getGroupColor(g) {
-        if (g.color) {
-            let c = g.color;
-            if (typeof c === "number") {
-                return "#" + c.toString(16).padStart(6, "0");
-            }
-            if (typeof c === "string" && c.startsWith("#") && (c.length === 4 || c.length === 7)) {
-                if (c.length === 4) {
-                    return "#" + c[1]+c[1] + c[2]+c[2] + c[3]+c[3];
-                }
-                return c;
-            }
-        }
-        return "";
-    }
-
     function nBounds(n) {
         const p = n.pos || [0, 0];
         const s = n.size || [100, 60];
@@ -345,67 +335,89 @@ function buildIgnoreGroupsUI(node) {
 
     /* ── 优化：rawGroups 缓存机制 ── */
     let _rgCache = null;
-    let _rgCacheFrame = 0;
+    let subscribed = false;
+    const graphWatchers = new Map();
 
     function rawGroups(invalidate) {
         if (invalidate) { _rgCache = null; }
         if (_rgCache) return _rgCache;
-        const g = app.graph;
-        if (!g || !g._groups) { _rgCache = []; return _rgCache; }
-        _rgCache = g._groups.map(gr => {
-            const color = getGroupColor(gr);
-            return {
-                title:  (gr.title || "").trim() || "Unnamed",
-                bounds: gBounds(gr),
-                ref:    gr,
-                color:  color,
-            };
-        });
+        const root = node.graph || app.graph;
+        const graphs = new Set();
+        _rgCache = [];
+        function visit(graph) {
+            if (!graph || graphs.has(graph)) return;
+            graphs.add(graph);
+            for (const gr of graph._groups || []) {
+                const title = (gr.title || "").trim() || "Unnamed";
+                _rgCache.push({
+                    title,
+                    key: graph === app.graph ? title : graph.id + ":" + title,
+                    selectionKey: gr.id == null
+                        ? (graph === app.graph ? title : graph.id + ":" + title)
+                        : graph.id + ":group:" + gr.id,
+                    graph,
+                    bounds: gBounds(gr),
+                    ref: gr,
+                });
+            }
+            for (const child of graph._nodes || []) {
+                if (child.isSubgraphNode?.()) visit(child.subgraph);
+            }
+        }
+        visit(root);
+        if (subscribed) {
+            for (const [graph, stop] of graphWatchers) {
+                if (!graphs.has(graph)) {
+                    stop();
+                    graphWatchers.delete(graph);
+                }
+            }
+            for (const graph of graphs) {
+                if (!graphWatchers.has(graph) && typeof graph.change === "function") {
+                    graphWatchers.set(graph, watchGraphChanges(graph, scheduleStateSync));
+                }
+            }
+        }
         return _rgCache;
     }
 
-    function invalidateRawGroups() {
-        _rgCache = null;
-    }
-
-    /* ── 优化：visible/collectNodes 支持接收缓存 ── */
-    function visible(cachedAll) {
+    function matchingGroups(cachedAll) {
         let list = cachedAll || rawGroups();
-        if (!cachedAll) list = list.slice(); // 防止修改缓存
-        list = list.filter(g => collectNodes(g, list, cachedAll).length > 0);
+        list = list.slice();
         if (filter.trim()) {
             const kw = filter.trim().toLowerCase();
             list = list.filter(g => g.title.toLowerCase().includes(kw));
         }
-        if (colorFilter && colorFilter !== "none") {
-            list = list.filter(g => {
-                if (colorFilter === "__transparent__") return !g.color;
-                return g.color && g.color.toLowerCase() === colorFilter.toLowerCase();
-            });
-        }
-        if (sortOrder === "position") {
-            list.sort((a, b) => {
+        list.sort((a, b) => {
+            const graphOrder = Number(a.graph !== app.graph) - Number(b.graph !== app.graph);
+            if (graphOrder) return graphOrder;
+            if (sortOrder === "position") {
                 const ax = a.bounds[0], ay = a.bounds[1];
                 const bx = b.bounds[0], by = b.bounds[1];
                 if (ay !== by) return ay - by;
                 return ax - bx;
-            });
-        } else {
-            list.sort((a, b) =>
-                a.title.localeCompare(b.title, undefined, { sensitivity: "base" })
-            );
-        }
+            }
+            return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+        });
         return list;
     }
 
+    function visible(cachedAll) {
+        const all = cachedAll || rawGroups();
+        return matchingGroups(all).filter(g =>
+            (selectedGroups === null || selectedGroups.has(g.selectionKey)) &&
+            collectNodes(g, all, all).length > 0
+        );
+    }
+
     function collectNodes(grp, allGroups, cachedAll) {
-        const g = app.graph;
+        const g = grp.graph;
         if (!g || !g._nodes) return [];
-        const all  = allGroups || rawGroups();
+        const all  = allGroups || cachedAll || rawGroups();
         const pb   = grp.bounds;
         const rects = [pb];
         all.forEach(ag => {
-            if (ag.ref !== grp.ref && inside(ag.bounds, pb)) {
+            if (ag.graph === g && ag.ref !== grp.ref && inside(ag.bounds, pb)) {
                 rects.push(ag.bounds);
             }
         });
@@ -417,7 +429,7 @@ function buildIgnoreGroupsUI(node) {
 
     function getChildSelections(grp, cachedAll) {
         const selections = [];
-        for (const controller of app.graph._nodes) {
+        for (const controller of grp.graph._nodes) {
             if (controller === node || !controller._guhaiSingleGroups) continue;
             const selection = controller._guhaiSingleGroups(grp, cachedAll);
             if (selection) selections.push({ controller, ...selection });
@@ -429,7 +441,7 @@ function buildIgnoreGroupsUI(node) {
         // 只记住单选子控制器的选择，普通子组和散节点不保存状态。
         const selections = getChildSelections(grp, cachedAll);
         if (getGroupState(grp, cachedAll) !== false) {
-            childSelections["group:" + grp.title] = Object.fromEntries(
+            childSelections["group:" + grp.key] = Object.fromEntries(
                 selections.map(s => [String(s.controller.id), s.active])
             );
         }
@@ -439,7 +451,7 @@ function buildIgnoreGroupsUI(node) {
     }
 
     function restoreGroup(grp, cachedAll) {
-        const key = "group:" + grp.title;
+        const key = "group:" + grp.key;
         const saved = childSelections[key] || {};
         const selections = getChildSelections(grp, cachedAll);
         collectNodes(grp, null, cachedAll).forEach(n => {
@@ -449,7 +461,7 @@ function buildIgnoreGroupsUI(node) {
         for (const selection of selections) {
             const id = String(selection.controller.id);
             const requested = Object.hasOwn(saved, id) ? saved[id] : selection.active;
-            const selected = selection.groups.find(g => g.title === requested)
+            const selected = selection.groups.find(g => g.key === requested)
                 || (selection.mode === "always_one" ? selection.groups[0] : null);
             for (const g of selection.groups) {
                 if (g === selected) continue;
@@ -464,12 +476,12 @@ function buildIgnoreGroupsUI(node) {
     function singleGroupsIn(parent, cachedAll) {
         if (mode !== "always_one" && mode !== "at_most_one") return null;
         const groups = visible(cachedAll).filter(g =>
-            g.ref !== parent.ref && inside(g.bounds, parent.bounds)
+            g.graph === parent.graph && g.ref !== parent.ref && inside(g.bounds, parent.bounds)
         );
         if (!groups.length) return null;
         const onList = groups.filter(g => getGroupState(g, cachedAll) !== false);
-        const selected = onList.find(g => g.title === active) || onList[0];
-        return { groups, mode, disable: igDisable, active: selected?.title || null };
+        const selected = onList.find(g => g.key === active) || onList[0];
+        return { groups, mode, disable: igDisable, active: selected?.key || null };
     }
 
     function isNodeActive(n) {
@@ -490,25 +502,25 @@ function buildIgnoreGroupsUI(node) {
     function computeStateSig(list, cachedAll) {
         return list.map(g => {
             const s = getGroupState(g, cachedAll);
-            return g.title + ":" + (s === true ? "1" : s === false ? "0" : "m");
+            return g.key + ":" + (s === true ? "1" : s === false ? "0" : "m");
         }).join("\x00");
     }
 
 
     function syncExternalState(cachedAll) {
-        if (!app.graph || !app.graph._nodes || app.graph._nodes.indexOf(node) < 0) return false;
+        if (!node.graph?._nodes?.includes(node)) return false;
 
         const all = cachedAll || rawGroups();
         let changed = false;
         if (mode === "default") {
-            const next = all.filter(g => getGroupState(g, all) !== false).map(g => g.title);
+            const next = all.filter(g => getGroupState(g, all) !== false).map(g => g.key);
             if (JSON.stringify(next) !== JSON.stringify(activeSet)) {
                 activeSet = next;
                 changed = true;
             }
         } else {
             const onList = visible(all).filter(g => getGroupState(g, all) !== false);
-            const next = onList.some(g => g.title === active) ? active : (onList[0]?.title || null);
+            const next = onList.some(g => g.key === active) ? active : (onList[0]?.key || null);
             if (next !== active) {
                 active = next;
                 changed = true;
@@ -539,7 +551,7 @@ function buildIgnoreGroupsUI(node) {
         if (mountFrame !== null) return;
         mountFrame = requestAnimationFrame(() => {
             mountFrame = null;
-            if (rootEl.isConnected || !app.graph?._nodes?.includes(node)) return;
+            if (rootEl.isConnected || !node.graph?._nodes?.includes(node)) return;
             const vueNode = document.querySelector(
                 `.lg-node[data-node-id="${CSS.escape(String(node.id))}"]`
             );
@@ -572,7 +584,7 @@ function buildIgnoreGroupsUI(node) {
         const effectiveColor = nameColor;
         let sig = list.map(g => {
             const isOn = getGroupState(g) !== false;
-            return g.title + (isOn ? ":1" : ":0");
+            return g.key + (isOn ? ":1" : ":0");
         }).join("\x00");
         sig += "|" + effectiveColor + "|" + (mode || "") + "|" + uiScale;
         return sig;
@@ -607,7 +619,7 @@ function buildIgnoreGroupsUI(node) {
         if (!list.length) {
             const empty = document.createElement("div");
             empty.className = "guhai-ig-empty";
-            empty.textContent = filter.trim() ? "无匹配的组" : "工作流中无编组或空的编组";
+            empty.textContent = "无匹配的非空组，请检查筛选设置";
             rootEl.appendChild(empty);
         } else {
             const h = calcHeight();
@@ -623,8 +635,17 @@ function buildIgnoreGroupsUI(node) {
                 const label = document.createElement("div");
                 label.className = "guhai-ig-label";
                 label.style.color = effectiveColor;
-                label.style.opacity = isOn ? "1" : "0.5";
-                label.textContent = g.title;
+                if (g.graph !== app.graph) {
+                    const arrow = document.createElement("span");
+                    arrow.style.color = "var(--guhai-ig-toggle-off)";
+                    arrow.style.fontSize = "0.67em";
+                    arrow.textContent = "↳ ";
+                    label.appendChild(arrow);
+                }
+                const title = document.createElement("span");
+                title.style.opacity = isOn ? "1" : "0.5";
+                title.textContent = g.title;
+                label.appendChild(title);
 
                 const toggle = document.createElement("div");
                 toggle.className = "guhai-ig-toggle" + (isOn ? " on" : "");
@@ -639,7 +660,7 @@ function buildIgnoreGroupsUI(node) {
 
                 row.addEventListener("mousedown", (e) => {
                     e.preventDefault(); e.stopPropagation();
-                    handleToggle(g.title);
+                    handleToggle(g.key);
                 });
                 row.addEventListener("pointerdown", (e) => e.stopPropagation());
                 row.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
@@ -679,7 +700,7 @@ function buildIgnoreGroupsUI(node) {
     function refresh(forceApply) {
         const cachedAll = rawGroups(true);
         const list = visible(cachedAll);
-        const sig = list.map(g => g.title).join("\x00");
+        const sig = list.map(g => g.key).join("\x00");
         const listChanged = sig !== lastSig;
         lastSig = sig;
         const stateChanged = syncExternalState(cachedAll);
@@ -687,13 +708,14 @@ function buildIgnoreGroupsUI(node) {
         // 刷新只同步界面；节点状态只由明确的开关操作修改。
         updateDynamicStyles();
         buildDom(forceApply || stateChanged || listChanged);
+        updateQuickFilter?.();
     }
 
 
-    function handleToggle(title) {
+    function handleToggle(key) {
         const cachedAll = rawGroups(true);
         const list = visible(cachedAll);
-        const grp = list.find(g => g.title === title);
+        const grp = list.find(g => g.key === key);
         if (!grp) return;
         const isOn = getGroupState(grp, cachedAll) !== false;
 
@@ -748,6 +770,8 @@ function buildIgnoreGroupsUI(node) {
             borderRadius: "8px", padding: "14px 18px",
             zIndex: "99999", minWidth: "250px",
             boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
+            backdropFilter: "blur(24px) saturate(150%)",
+            WebkitBackdropFilter: "blur(24px) saturate(150%)",
             color: "var(--input-text)", fontFamily: "inherit",
         });
         pop.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
@@ -756,7 +780,9 @@ function buildIgnoreGroupsUI(node) {
             if (overlay.parentNode) overlay.remove();
             if (pop.parentNode)     pop.remove();
             document.removeEventListener("keydown", onEsc);
-            document.removeEventListener("mousedown", closeColorPanel);
+            document.removeEventListener("mousedown", closeQuickPanel);
+            if (filterTimer !== null) clearTimeout(filterTimer);
+            updateQuickFilter = null;
             _settingsCleanup = null;
             if (_needsNodeHeightRefresh) {
                 _needsNodeHeightRefresh = false;
@@ -773,8 +799,8 @@ function buildIgnoreGroupsUI(node) {
         document.addEventListener("keydown", onEsc);
 
         function applyAll() {
+            const routeChanged = igDisable !== dRadioDisable.checked;
             filter      = fInput.value;
-            colorFilter = cFilter;
             igDisable   = dRadioDisable.checked;
             sortOrder   = sSelect.value;
             themeMode   = themeLight.checked ? "light" : "dark";
@@ -788,23 +814,29 @@ function buildIgnoreGroupsUI(node) {
                 _needsNodeHeightRefresh = true;
             }
 
+            if (routeChanged) {
+                const cachedAll = rawGroups(true);
+                visible(cachedAll).filter(g => getGroupState(g, cachedAll) === false)
+                    .forEach(g => bypassGroup(g, cachedAll));
+            }
+
             const modeChanged = newMode !== mode;
             if (modeChanged) {
                 if (newMode === "default") {
-                    activeSet = visible().map(g => g.title);
+                    activeSet = visible().map(g => g.key);
                 } else if (newMode === "always_one") {
                     const fl = visible();
-                    const ft = new Set(fl.map(g => g.title));
+                    const ft = new Set(fl.map(g => g.key));
                     if (activeSet && activeSet.length) {
                         const match = activeSet.find(t => ft.has(t));
-                        active = match || (fl.length ? fl[0].title : null);
+                        active = match || (fl.length ? fl[0].key : null);
                     } else {
-                        active = fl.length ? fl[0].title : null;
+                        active = fl.length ? fl[0].key : null;
                     }
                     activeSet = null;
                 } else {
                     const fl = visible();
-                    const ft = new Set(fl.map(g => g.title));
+                    const ft = new Set(fl.map(g => g.key));
                     if (activeSet && activeSet.length) {
                         const match = activeSet.find(t => ft.has(t));
                         active = match || null;
@@ -819,18 +851,18 @@ function buildIgnoreGroupsUI(node) {
             } else {
                 if (mode === "always_one" && !active) {
                     const list = visible();
-                    if (list.length) active = list[0].title;
+                    if (list.length) active = list[0].key;
                 }
             }
             if (modeChanged && mode !== "default") {
                 const cachedAll = rawGroups(true);
                 const list = visible(cachedAll);
                 list.forEach(g => {
-                    if (g.title !== active && getGroupState(g, cachedAll) !== false) {
+                    if (g.key !== active && getGroupState(g, cachedAll) !== false) {
                         bypassGroup(g, cachedAll);
                     }
                 });
-                const selected = list.find(g => g.title === active);
+                const selected = list.find(g => g.key === active);
                 if (selected && getGroupState(selected, cachedAll) === false) {
                     restoreGroup(selected, cachedAll);
                 }
@@ -880,7 +912,7 @@ function buildIgnoreGroupsUI(node) {
         pop.appendChild(fLabel);
 
         const fInput = document.createElement("input");
-        fInput.type = "text"; fInput.value = filter; fInput.placeholder = "留空 = 显示所有组";
+        fInput.type = "text"; fInput.value = filter; fInput.placeholder = "留空 = 不限关键词";
         Object.assign(fInput.style, {
             width: "100%", padding: "5px 8px", fontSize: "13px",
             background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
@@ -893,106 +925,140 @@ function buildIgnoreGroupsUI(node) {
             filterTimer = setTimeout(applyAll, 200);
         });
 
-        const cLabel = document.createElement("div");
-        cLabel.textContent = "颜色筛选";
-        Object.assign(cLabel.style, { fontSize: "13px", fontWeight: "bold", marginBottom: "4px" });
-        pop.appendChild(cLabel);
+        const quickLabel = document.createElement("div");
+        quickLabel.textContent = "快速筛选";
+        Object.assign(quickLabel.style, { fontSize: "13px", fontWeight: "bold", marginBottom: "4px" });
+        pop.appendChild(quickLabel);
 
-        let cFilter = colorFilter || "none";
+        const quickContainer = document.createElement("div");
+        Object.assign(quickContainer.style, { position: "relative", width: "100%", marginBottom: "14px" });
 
-        const cdContainer = document.createElement("div");
-        Object.assign(cdContainer.style, { position: "relative", width: "100%", marginBottom: "14px" });
-
-        const cdTrigger = document.createElement("div");
-        Object.assign(cdTrigger.style, {
+        const quickTrigger = document.createElement("div");
+        Object.assign(quickTrigger.style, {
             width: "100%", padding: "5px 8px", fontSize: "13px",
             background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
             color: "var(--input-text)", boxSizing: "border-box",
             cursor: "pointer", display: "flex", alignItems: "center", gap: "6px", userSelect: "none",
         });
-        const cdColorRect = document.createElement("span");
-        Object.assign(cdColorRect.style, {
-            display: "inline-block", width: "44px", height: "14px",
-            borderRadius: "2px", border: "1px solid var(--border-color)", flexShrink: "0",
-        });
-        const cdColorText = document.createElement("span");
-        Object.assign(cdColorText.style, { flex: "1" });
-        const cdArrow = document.createElement("span");
-        cdArrow.textContent = "\u25BE";
-        Object.assign(cdArrow.style, { marginLeft: "auto", fontSize: "11px", color: "var(--descrip-text)" });
-        cdTrigger.appendChild(cdColorRect); cdTrigger.appendChild(cdColorText); cdTrigger.appendChild(cdArrow);
+        const quickText = document.createElement("span");
+        quickText.style.flex = "1";
+        const quickArrow = document.createElement("span");
+        quickArrow.textContent = "\u25BE";
+        Object.assign(quickArrow.style, { marginLeft: "auto", fontSize: "11px", color: "var(--descrip-text)" });
+        quickTrigger.appendChild(quickText);
+        quickTrigger.appendChild(quickArrow);
+        quickContainer.appendChild(quickTrigger);
 
-        function updateColorPreview() {
-            if (cFilter === "none") {
-                cdColorRect.style.display = "none"; cdColorText.textContent = "无";
-            } else if (cFilter === "__transparent__") {
-                cdColorRect.style.display = "inline-block"; cdColorRect.style.background = "transparent";
-                cdColorText.textContent = "透明色";
-            } else {
-                cdColorRect.style.display = "inline-block"; cdColorRect.style.background = cFilter;
-                cdColorText.textContent = cFilter.toUpperCase();
-            }
-        }
-        updateColorPreview();
-        cdContainer.appendChild(cdTrigger);
-
-        let cdPanel = null;
-        function buildColorOptions() {
-            const allRaw = rawGroups();
-            const colorMap = new Map();
-            allRaw.forEach(g => { const c = g.color || "__transparent__"; if (!colorMap.has(c)) colorMap.set(c, g); });
-            const colors = Array.from(colorMap.keys());
-            if (cdPanel) { cdPanel.remove(); cdPanel = null; }
-            cdPanel = document.createElement("div");
-            Object.assign(cdPanel.style, {
-                position: "absolute", left: "0", right: "0", top: "calc(100% + 2px)",
-                background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
-                zIndex: "100001", maxHeight: "200px", overflowY: "auto",
-                boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+        let quickPanel = null;
+        let quickPanelSig = "";
+        updateQuickFilter = () => {
+            const groups = matchingGroups();
+            const count = groups.filter(g => selectedGroups === null || selectedGroups.has(g.selectionKey)).length;
+            quickText.textContent = `已选 ${count} / ${groups.length} 个组`;
+            if (!quickPanel) return;
+            const sig = JSON.stringify(groups.map(g => [g.selectionKey, g.title, selectedGroups?.has(g.selectionKey)]));
+            if (sig === quickPanelSig) return;
+            quickPanelSig = sig;
+            const scrollTop = quickPanel.scrollTop;
+            quickPanel.innerHTML = "";
+            const selectAllRow = document.createElement("label");
+            Object.assign(selectAllRow.style, {
+                position: "sticky", top: "0", zIndex: "1",
+                display: "flex", alignItems: "center", gap: "8px",
+                padding: "9px 8px", marginBottom: "4px", fontSize: "13px", fontWeight: "bold",
+                background: "var(--guhai-ig-select-all-bg)", color: "var(--input-text)",
+                borderBottom: "1px solid var(--guhai-ig-list-divider)", cursor: "pointer",
             });
-            cdPanel.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
-            function makeColorItem(bgColor, label, value, isTransparent, isNone) {
-                const item = document.createElement("div");
+            const selectAll = document.createElement("input");
+            selectAll.type = "checkbox";
+            selectAll.checked = groups.length > 0 && count === groups.length;
+            selectAll.indeterminate = count > 0 && count < groups.length;
+            selectAll.disabled = groups.length === 0;
+            Object.assign(selectAll.style, { margin: "0", flexShrink: "0", cursor: "pointer" });
+            selectAllRow.appendChild(selectAll);
+            selectAllRow.appendChild(document.createTextNode("全选"));
+            selectAll.addEventListener("change", () => {
+                if (selectedGroups === null) selectedGroups = new Set(rawGroups().map(g => g.selectionKey));
+                for (const g of groups) {
+                    if (selectAll.checked) selectedGroups.add(g.selectionKey);
+                    else selectedGroups.delete(g.selectionKey);
+                }
+                applyAll();
+                node.size = [calcWidth(), calcHeight()];
+            });
+            quickPanel.appendChild(selectAllRow);
+            for (const g of groups) {
+                const item = document.createElement("label");
                 Object.assign(item.style, {
                     display: "flex", alignItems: "center", gap: "8px",
-                    padding: "5px 8px", cursor: "pointer", fontSize: "13px", transition: "background 0.15s",
+                    padding: "5px 8px", cursor: "pointer", fontSize: "13px",
                 });
-                item.addEventListener("mouseenter", () => { item.style.background = "var(--border-color)"; });
+                item.addEventListener("mouseenter", () => { item.style.background = "var(--guhai-ig-list-hover)"; });
                 item.addEventListener("mouseleave", () => { item.style.background = "transparent"; });
-                if (!isNone) {
-                    const rect = document.createElement("span");
-                    Object.assign(rect.style, {
-                        display: "inline-block", width: "44px", height: "16px",
-                        borderRadius: "2px", border: "1px solid var(--border-color)",
-                        background: isTransparent ? "transparent" : bgColor, flexShrink: "0",
-                    });
-                    item.appendChild(rect);
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.checked = selectedGroups === null || selectedGroups.has(g.selectionKey);
+                Object.assign(checkbox.style, { margin: "0", flexShrink: "0", cursor: "pointer" });
+                item.appendChild(checkbox);
+                const text = document.createElement("span");
+                text.style.color = "var(--input-text)";
+                if (g.graph !== app.graph) {
+                    const arrow = document.createElement("span");
+                    arrow.style.color = "var(--guhai-ig-toggle-off)";
+                    arrow.style.fontSize = "0.67em";
+                    arrow.textContent = "↳ ";
+                    text.appendChild(arrow);
                 }
-                const txt = document.createElement("span");
-                txt.textContent = label; txt.style.color = "var(--input-text)"; item.appendChild(txt);
-                item.addEventListener("click", (e) => {
-                    e.stopPropagation(); cFilter = value; updateColorPreview();
-                    if (cdPanel) { cdPanel.remove(); cdPanel = null; } applyAll();
+                text.appendChild(document.createTextNode(g.title));
+                item.appendChild(text);
+                checkbox.addEventListener("change", () => {
+                    if (selectedGroups === null) selectedGroups = new Set(rawGroups().map(g => g.selectionKey));
+                    if (checkbox.checked) selectedGroups.add(g.selectionKey);
+                    else selectedGroups.delete(g.selectionKey);
+                    applyAll();
+                    node.size = [calcWidth(), calcHeight()];
                 });
-                return item;
+                quickPanel.appendChild(item);
             }
-            cdPanel.appendChild(makeColorItem("#2a2a2a", "无", "none", false, true));
-            colors.forEach(c => {
-                if (c === "__transparent__") { cdPanel.appendChild(makeColorItem("#2A2A2A", "透明色", "__transparent__", true, false)); }
-                else { cdPanel.appendChild(makeColorItem(c, c.toUpperCase(), c, false, false)); }
-            });
-            cdContainer.appendChild(cdPanel);
-        }
-        cdTrigger.addEventListener("click", (e) => {
-            e.stopPropagation();
-            if (cdPanel) { cdPanel.remove(); cdPanel = null; } else { buildColorOptions(); }
-        });
-        pop.appendChild(cdContainer);
-
-        const closeColorPanel = (e) => {
-            if (cdPanel && !cdContainer.contains(e.target)) { cdPanel.remove(); cdPanel = null; }
+            if (!groups.length) {
+                const empty = document.createElement("div");
+                empty.textContent = "无匹配的组";
+                Object.assign(empty.style, { padding: "8px", fontSize: "13px", color: "var(--descrip-text)" });
+                quickPanel.appendChild(empty);
+            }
+            quickPanel.scrollTop = scrollTop;
         };
-        document.addEventListener("mousedown", closeColorPanel);
+        quickTrigger.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (quickPanel) {
+                quickPanel.remove();
+                quickPanel = null;
+                return;
+            }
+            rawGroups(true);
+            quickPanel = document.createElement("div");
+            Object.assign(quickPanel.style, {
+                position: "absolute", left: "18px", right: "18px",
+                top: quickContainer.offsetTop + quickContainer.offsetHeight + 2 + "px", bottom: "14px",
+                background: "var(--comfy-input-bg)", border: "1px solid var(--border-color)", borderRadius: "4px",
+                zIndex: "100001", overflowY: "auto", overscrollBehavior: "contain",
+                boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+            });
+            quickPanel.addEventListener("wheel", (e) => e.stopPropagation());
+            pop.appendChild(quickPanel);
+            quickPanelSig = "";
+            updateQuickFilter();
+        });
+        updateQuickFilter();
+        pop.appendChild(quickContainer);
+
+        const closeQuickPanel = (e) => {
+            if (quickPanel && !quickContainer.contains(e.target) && !quickPanel.contains(e.target)) {
+                quickPanel.remove();
+                quickPanel = null;
+            }
+        };
+        document.addEventListener("mousedown", closeQuickPanel);
 
         const mLabel = document.createElement("div");
         mLabel.textContent = "切换模式";
@@ -1122,18 +1188,20 @@ function buildIgnoreGroupsUI(node) {
 
 
     let syncTimer = null;
-    let subscribed = false;
-    let stopWatchingGraph = null;
 
     function scheduleStateSync() {
         if (!subscribed || document.hidden || syncTimer !== null) return;
         // 仅由事件安排一次同步，同一批操作共用一个回调。
         syncTimer = setTimeout(() => {
             syncTimer = null;
-            if (!node.graph || document.hidden || node.graph !== app.graph) return;
+            if (!node.graph || document.hidden) return;
             const cachedAll = rawGroups(true);
+            if (selectedGroups === null) {
+                selectedGroups = new Set(cachedAll.map(g => g.selectionKey));
+                save();
+            }
             const list = visible(cachedAll);
-            const sig = list.map(g => g.title).join("\x00");
+            const sig = list.map(g => g.key).join("\x00");
             const stateSig = computeStateSig(list, cachedAll);
             const listChanged = sig !== lastSig;
             const stateChanged = stateSig !== lastStateSig;
@@ -1144,6 +1212,7 @@ function buildIgnoreGroupsUI(node) {
                 updateDynamicStyles();
                 buildDom(true);
             }
+            updateQuickFilter?.();
         }, 30);
     }
 
@@ -1157,10 +1226,7 @@ function buildIgnoreGroupsUI(node) {
     function subscribeStateSync() {
         if (subscribed) return;
         subscribed = true;
-        const graph = node.graph || app.graph;
-        if (graph && typeof graph.change === "function") {
-            stopWatchingGraph = watchGraphChanges(graph, scheduleStateSync);
-        }
+        rawGroups(true);
         document.addEventListener("keydown", onKeyDown, true);
         // rgthree 等扩展可能只修改 mode 并重绘，在操作结束后读取最终状态。
         document.addEventListener("pointerup", scheduleStateSync, true);
@@ -1175,8 +1241,8 @@ function buildIgnoreGroupsUI(node) {
             clearTimeout(syncTimer);
             syncTimer = null;
         }
-        stopWatchingGraph?.();
-        stopWatchingGraph = null;
+        graphWatchers.forEach(stop => stop());
+        graphWatchers.clear();
         document.removeEventListener("keydown", onKeyDown, true);
         document.removeEventListener("pointerup", scheduleStateSync, true);
         document.removeEventListener("click", scheduleStateSync, true);

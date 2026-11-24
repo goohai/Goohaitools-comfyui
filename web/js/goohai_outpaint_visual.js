@@ -7,6 +7,30 @@ const RATIOS = ["自由比例", "原始比例", "1:1", "2:3", "3:2", "3:4", "4:3
 const SIDES = { left: "左", right: "右", top: "上", bottom: "下" };
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const loaderSubscriptions = new WeakMap();
+const graphSubscriptions = new WeakMap();
+
+function subscribeGraph(graph, notify) {
+    if (!graph || typeof graph.change !== "function") return () => {};
+    let subscription = graphSubscriptions.get(graph);
+    if (!subscription) {
+        const original = graph.change;
+        subscription = { listeners: new Set(), original };
+        subscription.wrapped = function () {
+            const result = original.apply(this, arguments);
+            for (const listener of subscription.listeners) listener();
+            return result;
+        };
+        graph.change = subscription.wrapped;
+        graphSubscriptions.set(graph, subscription);
+    }
+    subscription.listeners.add(notify);
+    return () => {
+        subscription.listeners.delete(notify);
+        if (subscription.listeners.size) return;
+        if (graph.change === subscription.wrapped) graph.change = subscription.original;
+        graphSubscriptions.delete(graph);
+    };
+}
 
 function limitCrops(values, iw, ih) {
     const result = { ...values };
@@ -950,9 +974,21 @@ function createPreview(node) {
         state.loaderKey = key;
         state.refresh();
     };
+    let loaderCheckPending = false;
+    const checkLoader = () => {
+        if (state.disposed || loaderCheckPending) return;
+        loaderCheckPending = true;
+        queueMicrotask(() => {
+            loaderCheckPending = false;
+            if (node.graph && node.graph === app.graph) state.observeLoader();
+        });
+    };
+    api.addEventListener("graphChanged", checkLoader);
     function patchLoaderEvents(loader) {
         state.unsubscribeLoader?.();
+        state.unsubscribeGraph?.();
         state.loaderNode = loader;
+        state.unsubscribeGraph = subscribeGraph(loader?.graph, checkLoader);
         state.unsubscribeLoader = subscribeLoader(loader, () => state.observeLoader(
             loader.type !== "GoohaiImageLibrary" && loader.comfyClass !== "GoohaiImageLibrary"));
     }
@@ -972,6 +1008,7 @@ function createPreview(node) {
         state.disposed = true;
         for (const type of navigationEvents) document.removeEventListener(type, capturePreviewNavigation, true);
         api.removeEventListener("executing", refreshOnExecution);
+        api.removeEventListener("graphChanged", checkLoader);
         cancelAnimationFrame(state.displayFrame);
         transformObserver.disconnect();
         mountObserver.disconnect();
@@ -983,6 +1020,7 @@ function createPreview(node) {
         state.cancelPreview?.();
         state.previewController?.abort();
         state.unsubscribeLoader?.();
+        state.unsubscribeGraph?.();
         state.cancelImage?.();
         state.imageRequest = (state.imageRequest || 0) + 1;
         state.resizeObserver?.disconnect();
