@@ -204,6 +204,15 @@ function installLoaderCrop(node) {
         },
         captureCanvas() {
             for (const candidate of node.widgets || []) {
+                // Latent preview extensions can target this loader after a workflow switch reuses a sampler id.
+                if (candidate.name === "vhslatentpreview" || candidate.name === "zml_latentpreview") {
+                    if (candidate.hidden && candidate.element?.style.display === "none") continue;
+                    candidate.hidden = true;
+                    candidate.computeSize = () => [0, -4];
+                    candidate.computeLayoutSize = () => ({ minHeight: 0, maxHeight: 0 });
+                    if (candidate.element) candidate.element.style.display = "none";
+                    continue;
+                }
                 if (candidate.name !== "$$canvas-image-preview" || candidate._guhaiCropDraw) continue;
                 const draw = candidate.drawWidget || candidate.draw;
                 if (typeof draw !== "function") continue;
@@ -2681,9 +2690,20 @@ function getNodeScreenPoint(node, x, y) {
 
 function ensureNodeToolbar(node, nodeRoot = null) {
     if (!isLoadImageGoohaiNode(node)) return null;
-    const root = nodeRoot || node._guhaiDomToolbar?.closest?.("[data-node-id]");
+    let root = nodeRoot || node._guhaiDomToolbar?.closest?.("[data-node-id]");
     if (!root?.isConnected) return null;
-    let toolbar = root.querySelector?.(".guhai-nodes2-load-toolbar");
+    // Nested Vue elements can carry the same node id; keep one toolbar on the outer root.
+    let parent = root.parentElement?.closest?.("[data-node-id]");
+    while (parent?.dataset.nodeId === String(node.id)) {
+        root = parent;
+        parent = root.parentElement?.closest?.("[data-node-id]");
+    }
+    const toolbars = [...root.querySelectorAll(".guhai-nodes2-load-toolbar")]
+        .filter((item) => item.closest("[data-node-id]")?.dataset.nodeId === String(node.id));
+    let toolbar = toolbars.includes(node._guhaiDomToolbar) ? node._guhaiDomToolbar : toolbars[0];
+    for (const item of toolbars) {
+        if (item !== toolbar) item.remove();
+    }
     if (!toolbar) {
         toolbar = document.createElement("div");
         toolbar.className = "guhai-nodes2-load-toolbar";
@@ -2800,6 +2820,7 @@ function refreshNodes2LoadImageToolbars(root = document) {
         : [...(root.querySelectorAll?.("[data-node-id]") || [])];
     for (const nodeRoot of roots) {
         const nodeId = nodeRoot.dataset?.nodeId;
+        if (nodeRoot.parentElement?.closest?.("[data-node-id]")?.dataset.nodeId === nodeId) continue;
         const node = nodeId != null
             ? (app.graph?.getNodeById?.(nodeId) || app.graph?.getNodeById?.(Number(nodeId)))
             : null;

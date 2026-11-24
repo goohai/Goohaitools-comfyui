@@ -51,7 +51,7 @@ function subscribeLoader(loader, notify) {
     let subscription = loaderSubscriptions.get(loader);
     if (!subscription) {
         subscription = { listeners: new Set(), hooks: [] };
-        const widgets = loader.widgets?.filter((item) => ["image", "图像", "image_type"].includes(item.name)) || [];
+        const widgets = loader.widgets?.filter((item) => ["image", "图像", "image_type", "crop"].includes(item.name)) || [];
         let pending = false;
         const changed = () => {
             if (pending) return;
@@ -105,6 +105,16 @@ function imageUrl(filename, type = "input", subfolder = "") {
     return api.apiURL(`/view?${q}`);
 }
 
+function loaderCrop(node, image, type = null) {
+    try {
+        const saved = JSON.parse(node.widgets?.find((item) => item.name === "crop")?.value || "null");
+        if (saved?.image === image && (type === null || saved.type === type)
+            && Array.isArray(saved.rect) && saved.rect.length === 4
+            && saved.rect.every(Number.isFinite) && saved.rect[2] > 0 && saved.rect[3] > 0) return saved.rect;
+    } catch (_) {}
+    return null;
+}
+
 function loaderInfo(node) {
     const input = node.inputs?.find((item) => item.name === "图像" || item.name === "image");
     const link = input?.link ?? input?.links?.[0];
@@ -115,7 +125,8 @@ function loaderInfo(node) {
         const widget = upstream.widgets?.find((item) => item.name === "image");
         const type = upstream.widgets?.find((item) => item.name === "image_type")?.value;
         const value = widget?.value;
-        return { node: upstream, widget, key: `ghil|${type}|${value}`, url: null,
+        const crop = loaderCrop(upstream, value, type);
+        return { node: upstream, widget, crop, key: `ghil|${type}|${value}|${JSON.stringify(crop)}`, url: null,
             selection: type && type !== "无" && value ? new URLSearchParams({ type, image: value }) : null };
     }
     const isLoader = ["LoadImage", "LoadImageGoohai", "LoadImageOutput"].includes(upstream.type)
@@ -131,10 +142,13 @@ function loaderInfo(node) {
     const parts = raw.split("/");
     const filename = parts.pop();
     const subfolder = parts.join("/");
+    const crop = upstream.type === "LoadImageGoohai" || upstream.comfyClass === "LoadImageGoohai"
+        ? loaderCrop(upstream, value) : null;
     return {
         node: upstream,
         widget,
-        key: `${type}|${subfolder}|${filename}`,
+        crop,
+        key: `${type}|${subfolder}|${filename}|${JSON.stringify(crop)}`,
         url: imageUrl(filename, type, subfolder),
     };
 }
@@ -896,9 +910,10 @@ function createPreview(node) {
         event.stopPropagation();
         if (load.disabled) return;
         try {
+            const crop = loaderInfo(node)?.crop;
             const url = await loaderFor(node);
             if (state.disposed) return;
-            if (url) { await setImage(url); return; }
+            if (url) { await setImage(url, crop); return; }
             if (loaderInfo(node)?.node?.comfyClass === "GoohaiImageLibrary" || loaderInfo(node)?.node?.type === "GoohaiImageLibrary") {
                 await setImage(null); return;
             }
@@ -918,7 +933,7 @@ function createPreview(node) {
         } catch (error) { finish(error.message); }
     });
     reset.addEventListener("click", (event) => { event.stopPropagation(); if (state.image) writePads(constrain({ left: 0, right: 0, top: 0, bottom: 0 }, state.image.naturalWidth, state.image.naturalHeight)); state.sourceAnchor = null; state.fixedOutput = null; state.pan = {}; state.zoom = 1; draw(); });
-    async function setImage(src) {
+    async function setImage(src, crop = null) {
         if (state.disposed) return;
         state.cancelImage?.();
         state.imageRequest = (state.imageRequest || 0) + 1;
@@ -930,6 +945,20 @@ function createPreview(node) {
             state.cancelImage = cancel;
             const finish = () => { img.onload = img.onerror = null; if (state.cancelImage === cancel) state.cancelImage = null; };
             img.onload = () => {
+                if (!state.disposed && requestId === state.imageRequest && crop) {
+                    const [x, y, w, h] = crop;
+                    crop = null;
+                    const iw = img.naturalWidth, ih = img.naturalHeight;
+                    const left = clamp(Math.round(x * iw), 0, iw - 1), top = clamp(Math.round(y * ih), 0, ih - 1);
+                    const right = clamp(Math.round((x + w) * iw), left + 1, iw), bottom = clamp(Math.round((y + h) * ih), top + 1, ih);
+                    const cropped = document.createElement("canvas");
+                    cropped.width = right - left; cropped.height = bottom - top;
+                    try {
+                        cropped.getContext("2d").drawImage(img, left, top, cropped.width, cropped.height, 0, 0, cropped.width, cropped.height);
+                        img.src = cropped.toDataURL("image/png");
+                    } catch (error) { finish(); reject(error); }
+                    return;
+                }
                 finish();
                 if (!state.disposed && requestId === state.imageRequest) {
                     state.image = img; state.sourceAnchor = null; state.fixedOutput = null; state.pan = {}; state.zoom = 1; enforce();
@@ -946,12 +975,13 @@ function createPreview(node) {
         const request = state.refreshRequest = (state.refreshRequest || 0) + 1;
         state.cancelImage?.();
         state.imageRequest = (state.imageRequest || 0) + 1;
-        const loader = loaderInfo(node)?.node;
+        const source = loaderInfo(node);
+        const loader = source?.node;
         if (loader !== state.loaderNode) patchLoaderEvents(loader);
         try {
             const url = await loaderFor(node) || state.upstreamPreviewUrl;
             if (state.disposed || request !== state.refreshRequest) return;
-            await setImage(url);
+            await setImage(url, source?.crop);
         } catch (error) {
             if (!state.disposed && request === state.refreshRequest) info.textContent = error.message;
             return;
