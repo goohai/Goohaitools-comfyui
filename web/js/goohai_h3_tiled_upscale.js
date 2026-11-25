@@ -1,7 +1,7 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 
-const UPSCALE_TYPE = "H3TiledUpscaleGH";
+const UPSCALE_TYPE = "Minimax H3 图像高清修复 分块";
 const INTERNAL_NODE_TYPES = new Set(["H3TiledEncodeGH", "H3TiledSampleGH", "H3TiledFinishGH"]);
 const upscaleNodes = new Set();
 const PROMPT_MIN_HEIGHT = 64;
@@ -23,7 +23,7 @@ function syncUpscaleLayout(node, body) {
     const image = node.imgs?.[node.imageIndex ?? 0] || node.imgs?.[0];
     const vueImage = body?.querySelector(".image-preview, img[data-testid='main-image'], img[alt]");
     const hasPreview = Boolean(image || vueImage || preview);
-    const promptRow = body?.querySelector('[data-widget-name="prompt"]');
+    const promptRow = body?.querySelector('[data-widget-name="提示词"]');
     if (promptRow) {
         promptRow.style.height = `${state.promptHeight}px`;
         promptRow.style.maxHeight = `${state.promptHeight}px`;
@@ -75,7 +75,7 @@ function renderUpscaleStatus(root, status) {
     }
     if (status.phase === "修复完成") {
         const done = document.createElement("span");
-        done.textContent = "✓";
+        done.textContent = "✔";
         done.style.color = "#78bf5f";
         done.title = "修复完成";
         line.append(done);
@@ -96,7 +96,7 @@ function pinUpscaleStatus(node) {
     if (!state || state.disposed) return;
     const widgets = node.widgets;
     const index = widgets?.indexOf(state.widget);
-    const controlsEnd = widgets?.findIndex((item) => item.name === "release_models");
+    const controlsEnd = widgets?.findIndex((item) => item.name === "释放模型");
     const targetIndex = controlsEnd >= 0 ? controlsEnd + 1 - (index < controlsEnd ? 1 : 0) : index;
     if (index >= 0 && index !== targetIndex) {
         widgets.splice(index, 1);
@@ -159,8 +159,8 @@ function scheduleUpscalePlan(node) {
             if (node.inputs?.[0]?.link == null || !state.status?.plan) setUpscaleStatus(node, { phase: "待运行" });
             return;
         }
-        const output = node.widgets.find((widget) => widget.name === "output_long_edge")?.value;
-        const tile = node.widgets.find((widget) => widget.name === "tile_size")?.value;
+        const output = node.widgets.find((widget) => widget.name === "输出长边")?.value;
+        const tile = node.widgets.find((widget) => widget.name === "分块尺寸")?.value;
         const key = `${node.inputs?.[0]?.link}:${size}:${output}:${tile}`;
         if (state.planKey === key) return;
         try {
@@ -184,6 +184,11 @@ function scheduleUpscalePlan(node) {
 
 function installUpscaleStatus(node) {
     if (node._ghUpscaleStatus) return;
+    const seedControl = node.widgets.find((item) => item.name === "control_after_generate");
+    if (seedControl) {
+        seedControl.name = "生成后控制";
+        seedControl.label = "生成后控制";
+    }
     const root = document.createElement("div");
     root.style.cssText = "box-sizing:border-box;width:100%;padding:2px 10px 6px;color:var(--input-text,#ddd);font:14px/20px sans-serif;overflow:hidden;pointer-events:none;";
     const vueRoot = root.cloneNode(false);
@@ -194,7 +199,7 @@ function installUpscaleStatus(node) {
     });
     widget.serialize = false;
     widget.options.onDraw = () => root.closest(".dom-widget")?.style.setProperty("pointer-events", "none", "important");
-    const prompt = node.widgets.find((item) => item.name === "prompt");
+    const prompt = node.widgets.find((item) => item.name === "提示词");
     prompt.options.getMinHeight = () => PROMPT_MIN_HEIGHT;
     prompt.options.getMaxHeight = () => node._ghUpscaleStatus.promptHeight;
     node._ghUpscaleStatus = {
@@ -204,7 +209,7 @@ function installUpscaleStatus(node) {
         running: false, planVersion: 0, compactPending: true,
     };
     upscaleNodes.add(node);
-    for (const name of ["output_long_edge", "tile_size"]) {
+    for (const name of ["输出长边", "分块尺寸"]) {
         const slider = node.widgets.find((item) => item.name === name);
         const callback = slider.callback;
         slider.callback = function () {
@@ -243,8 +248,8 @@ app.registerExtension({
                 state.sourceLink = node.inputs?.[0]?.link;
                 state.sourceSize = [detail.source_width, detail.source_height];
                 if (!state.running) {
-                    const output = node.widgets.find((widget) => widget.name === "output_long_edge")?.value;
-                    const tile = node.widgets.find((widget) => widget.name === "tile_size")?.value;
+                    const output = node.widgets.find((widget) => widget.name === "输出长边")?.value;
+                    const tile = node.widgets.find((widget) => widget.name === "分块尺寸")?.value;
                     state.planKey = `${state.sourceLink}:${state.sourceSize}:${output}:${tile}`;
                 }
                 setUpscaleStatus(node, detail);
@@ -359,8 +364,8 @@ app.registerExtension({
                 clearTimeout(state.planTimer);
                 state.sourceLink = this.inputs?.[0]?.link;
                 state.sourceSize = [status.source_width, status.source_height];
-                const output = this.widgets.find((widget) => widget.name === "output_long_edge")?.value;
-                const tile = this.widgets.find((widget) => widget.name === "tile_size")?.value;
+                const output = this.widgets.find((widget) => widget.name === "输出长边")?.value;
+                const tile = this.widgets.find((widget) => widget.name === "分块尺寸")?.value;
                 state.planKey = `${state.sourceLink}:${state.sourceSize}:${output}:${tile}`;
                 setUpscaleStatus(this, status);
             }

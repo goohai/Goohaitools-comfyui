@@ -13,6 +13,7 @@ import comfy.samplers
 import comfy.utils
 import folder_paths
 import latent_preview
+import node_helpers
 import nodes
 from comfy_api.latest import io
 from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageConditioning
@@ -250,18 +251,26 @@ def _align_image(reference, generated):
     return cv2.remap(generated, dx, dy, cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT_101)
 
 
-def _encode_tile(clip, vae, reference, prompt):
+def _encode_tile(clip, vae, reference, prompt, vision_size="1024"):
     height, width = reference.shape[:2]
-    scale = 1024 / min(width, height)
-    ref_width, ref_height = (max(32, round(side * scale / 32) * 32) for side in (width, height))
-    prepared = cv2.resize(reference, (ref_width, ref_height), interpolation=cv2.INTER_CUBIC)
+    prepared = reference
+    if vision_size != "跟随分块":
+        scale = int(vision_size) / min(width, height)
+        ref_width, ref_height = (max(32, round(side * scale / 32) * 32) for side in (width, height))
+        if max(ref_width, ref_height) < max(width, height):
+            prepared = cv2.resize(reference, (ref_width, ref_height), interpolation=cv2.INTER_CUBIC)
     prepared = torch.from_numpy(np.clip(prepared, 0, 1)).unsqueeze(0)
     sample_width, sample_height = (math.ceil(side / 32) * 32 for side in (width, height))
     conditioning = MiniMaxH3ImageConditioning.execute(
         clip=clip, prompt=prompt, width=sample_width, height=sample_height,
-        vae=vae, images={"image_0": prepared},
+        images={"image_0": prepared},
     )
     positive, latent = conditioning.args
+    reference_latent = vae.encode(prepared)
+    positive = node_helpers.conditioning_set_values(positive, {"minimax_refs": [{
+        "kind": "image", "latent_h": reference_latent.shape[-2],
+        "latent_w": reference_latent.shape[-1], "latent": reference_latent,
+    }]})
     negative, = nodes.ConditioningZeroOut().zero_out(positive)
     return positive, negative, tuple(latent["samples"].shape)
 
@@ -295,7 +304,7 @@ def _sample_tile(model, vae, reference, encoded, seed, steps, sampler_name, sche
     return np.clip(aligned, 0, 1)
 
 
-class H3TiledUpscaleGH(io.ComfyNode):
+class MinimaxH3图像高清修复分块(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         models = folder_paths.get_filename_list("diffusion_models")
@@ -303,69 +312,72 @@ class H3TiledUpscaleGH(io.ComfyNode):
         vaes = folder_paths.get_filename_list("vae")
         loras = ["无", *folder_paths.get_filename_list("loras")]
         return io.Schema(
-            node_id="H3TiledUpscaleGH",
-            display_name="Minimax H3 图像高清修复 分块",
+            node_id="Minimax H3 图像高清修复 分块",
             category="孤海工具箱/图像",
-            description="MiniMax H3 Image 分块高清修复。参考VAE短边1024，至少128像素重叠，中心64像素羽化；逐块对齐并还原颜色。",
+            description="MiniMax H3 Image 分块高清修复。参考VAE短边默认1024，可选择尺寸或跟随分块；至少256像素重叠，中心96像素羽化；逐块对齐并还原颜色。",
             inputs=[
-                io.Image.Input("image", display_name="图像", raw_link=True),
-                io.Combo.Input("model_name", options=models, display_name="模型", socketless=True,
+                io.Image.Input("图像", raw_link=True),
+                io.Combo.Input("模型", options=models, socketless=True,
                                default=_model_default(models, "minimax_h3_image_pruned_int8_convrot.safetensors")),
-                io.Combo.Input("clip_name", options=clips, display_name="CLIP", socketless=True,
+                io.Combo.Input("CLIP", options=clips, socketless=True,
                                default=_model_default(clips, "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")),
-                io.Combo.Input("vae_name", options=vaes, display_name="VAE", socketless=True,
+                io.Combo.Input("VAE", options=vaes, socketless=True,
                                default=_model_default(vaes, "minimax_h3_image_vae_fp16.safetensors")),
-                io.Combo.Input("lora_name", options=loras, default="无", display_name="LoRA", socketless=True),
-                io.Float.Input("lora_strength", default=1.0, min=-100.0, max=100.0, step=0.01,
-                               display_name="LoRA强度", socketless=True),
-                io.String.Input("prompt", multiline=True, raw_link=True, default="保持构图与颜色不变，将图像高清还原为惊人的8K画质",
-                                display_name="提示词", tooltip="可直接输入，或将文本框转换为输入后连接外部提示词。"),
-                io.Int.Input("output_long_edge", default=4096, min=2048, max=12800, step=256,
-                             display_name="输出长边", display_mode=io.NumberDisplay.slider, socketless=True),
-                io.Int.Input("tile_size", default=2048, min=1536, max=4096, step=256,
-                             display_name="分块尺寸", display_mode=io.NumberDisplay.slider, socketless=True,
+                io.Combo.Input("LoRA", options=loras, default="minimax-H3-image-高清放大_GH.safetensors", socketless=True),
+                io.Float.Input("LoRA强度", default=1.0, min=-100.0, max=100.0, step=0.01,
+                               socketless=True),
+                io.String.Input("提示词", multiline=True, raw_link=True, default="保持构图与颜色不变，将图像高清还原为惊人的8K画质",
+                                tooltip="可直接输入，或将文本框转换为输入后连接外部提示词。"),
+                io.Int.Input("输出长边", default=4096, min=2048, max=12800, step=256,
+                             display_mode=io.NumberDisplay.slider, socketless=True),
+                io.Int.Input("分块尺寸", default=2048, min=1536, max=4096, step=256,
+                             display_mode=io.NumberDisplay.slider, socketless=True,
                              tooltip="参考值。分块长边在1536～4096且偏差不超过512；整图较小时直接处理整图。部分尺寸组合会有较大重叠。"),
-                io.Int.Input("seed", default=833914818116436, min=0, max=0xffffffffffffffff,
-                             control_after_generate=True, display_name="种子值", socketless=True),
-                io.Int.Input("steps", default=6, min=1, max=10000, display_name="步数", socketless=True),
-                io.Combo.Input("sampler_name", options=comfy.samplers.KSampler.SAMPLERS, default="euler",
-                               display_name="采样器", socketless=True),
-                io.Combo.Input("scheduler", options=comfy.samplers.KSampler.SCHEDULERS, default="simple",
-                               display_name="调度器", socketless=True),
-                io.Combo.Input("color_match", options=COLOR_METHODS, default="wavelet", display_name="颜色匹配", socketless=True),
-                io.Boolean.Input("release_models", default=False, display_name="释放模型", socketless=True,
+                io.Combo.Input("视觉编码尺寸", options=["跟随分块", "1024", "1280", "1536", "1792", "2048"],
+                               default="1024", socketless=True,
+                               tooltip="VAE参考图编码短边，编码长边不超过实际分块长边。跟随分块时不做缩放。"),
+                io.Int.Input("种子值", default=833914818116436, min=0, max=0xffffffffffffffff,
+                             control_after_generate=True, socketless=True),
+                io.Int.Input("步数", default=6, min=1, max=10000, socketless=True),
+                io.Combo.Input("采样器", options=comfy.samplers.KSampler.SAMPLERS, default="lcm",
+                               socketless=True),
+                io.Combo.Input("调度器", options=comfy.samplers.KSampler.SCHEDULERS, default="simple",
+                               socketless=True),
+                io.Combo.Input("颜色匹配", options=COLOR_METHODS, default="无", socketless=True),
+                io.Boolean.Input("释放模型", default=False, socketless=True,
                                  tooltip="完成后卸载本节点模型并释放空闲显存，保留条件及分块缓存；下次采样需重新加载模型到显卡。"),
             ],
-            outputs=[io.Image.Output(display_name="图像")],
+            outputs=[io.Image.Output("图像")],
             hidden=[io.Hidden.unique_id],
             enable_expand=True,
         )
 
     @classmethod
-    def execute(cls, image, model_name, clip_name, vae_name, lora_name, lora_strength, prompt,
-                output_long_edge, tile_size, color_match, seed, steps, sampler_name, scheduler, release_models=False):
+    def execute(cls, 图像, 模型, CLIP, VAE, LoRA, LoRA强度, 提示词,
+                输出长边, 分块尺寸, 颜色匹配, 种子值, 步数, 采样器, 调度器, 释放模型=False, 视觉编码尺寸="1024"):
         graph = GraphBuilder()
         owner = cls.hidden.unique_id
-        clip = graph.node("CLIPLoader", id="clip", clip_name=clip_name, type="minimax", device="default")
-        vae = graph.node("VAELoader", id="vae", vae_name=vae_name)
+        clip = graph.node("CLIPLoader", id="clip", clip_name=CLIP, type="minimax", device="default")
+        vae = graph.node("VAELoader", id="vae", vae_name=VAE)
         conditions = graph.node(
-            "H3TiledEncodeGH", id="conditions", image=image, clip=clip.out(0), vae=vae.out(0),
-            prompt=prompt, output_long_edge=output_long_edge, tile_size=tile_size, owner=owner,
+            "H3TiledEncodeGH", id="conditions", image=图像, clip=clip.out(0), vae=vae.out(0),
+            prompt=提示词, output_long_edge=输出长边, tile_size=分块尺寸, owner=owner,
+            vision_size=视觉编码尺寸,
         )
-        model = graph.node("UNETLoader", id="model", unet_name=model_name, weight_dtype="default")
-        if lora_name != "无" and lora_strength != 0:
+        model = graph.node("UNETLoader", id="model", unet_name=模型, weight_dtype="default")
+        if LoRA != "无" and LoRA强度 != 0:
             model = graph.node(
                 "LoraLoaderModelOnly", id="lora", model=model.out(0),
-                lora_name=lora_name, strength_model=lora_strength,
+                lora_name=LoRA, strength_model=LoRA强度,
             )
         sampling = graph.node(
-            "H3TiledSampleGH", id="sampling", image=image, model=model.out(0), vae=vae.out(0),
+            "H3TiledSampleGH", id="sampling", image=图像, model=model.out(0), vae=vae.out(0),
             conditions=conditions.out(0),
-            seed=seed, steps=steps, sampler_name=sampler_name, scheduler=scheduler, owner=owner,
+            seed=种子值, steps=步数, sampler_name=采样器, scheduler=调度器, owner=owner,
         )
         finish = graph.node(
-            "H3TiledFinishGH", id="finish", image=image, tiles=sampling.out(0),
-            color_match=color_match, owner=owner, release_models=release_models,
+            "H3TiledFinishGH", id="finish", image=图像, tiles=sampling.out(0),
+            color_match=颜色匹配, owner=owner, release_models=释放模型,
             model=model.out(0), clip=clip.out(0), vae=vae.out(0),
         )
         for internal in (clip, vae, conditions, model, sampling, finish):
@@ -415,12 +427,13 @@ class H3TiledEncodeGH(io.ComfyNode):
                 io.Image.Input("image"), io.Clip.Input("clip"), io.Vae.Input("vae"),
                 io.String.Input("prompt"), io.Int.Input("output_long_edge"), io.Int.Input("tile_size"),
                 io.String.Input("owner"),
+                io.String.Input("vision_size", default="1024", optional=True),
             ],
             outputs=[H3TileConditions.Output()],
         )
 
     @classmethod
-    def execute(cls, image, clip, vae, prompt, output_long_edge, tile_size, owner):
+    def execute(cls, image, clip, vae, prompt, output_long_edge, tile_size, owner, vision_size="1024"):
         height, width = image.shape[1:3]
         output_width, output_height, xs, ys, plan = _tile_plan(width, height, output_long_edge, tile_size)
         encoded = []
@@ -434,7 +447,7 @@ class H3TiledEncodeGH(io.ComfyNode):
                     comfy.model_management.throw_exception_if_processing_interrupted()
                     tile_number = row * len(xs) + column + 1
                     _report_tile(plan, image, owner, batch_index, tile_number, len(xs) * len(ys), "条件编码中...")
-                    positive, negative, shape = _encode_tile(clip, vae, reference[top:bottom, left:right], prompt)
+                    positive, negative, shape = _encode_tile(clip, vae, reference[top:bottom, left:right], prompt, vision_size)
                     encoded.append((_conditioning_to_cpu(positive), _conditioning_to_cpu(negative), shape))
                     del positive, negative
                     progress.update(1)
@@ -565,7 +578,7 @@ class H3TiledFinishGH(io.ComfyNode):
 
 
 NODE_CLASS_MAPPINGS = {
-    "H3TiledUpscaleGH": H3TiledUpscaleGH,
+    "Minimax H3 图像高清修复 分块": MinimaxH3图像高清修复分块,
     "H3TiledEncodeGH": H3TiledEncodeGH,
     "H3TiledSampleGH": H3TiledSampleGH,
     "H3TiledFinishGH": H3TiledFinishGH,
