@@ -34,8 +34,8 @@ def _axis_plans(length, lower, upper):
         plans.append([(0, length)])
     max_count = max(1, math.ceil((length - OVERLAP) / (512 - OVERLAP)))
     for count in range(2, max_count + 1):
-        needed = math.ceil((length + OVERLAP * (count - 1)) / count)
-        for size in sorted({needed, max(needed, lower)}):
+        needed = math.ceil((length + OVERLAP * (count - 1)) / (count * 32)) * 32
+        for size in sorted({needed, max(needed, math.ceil(lower / 32) * 32)}):
             if size < min(512, length) or size > upper or size >= length:
                 continue
             starts = [round(index * (length - size) / (count - 1)) for index in range(count)]
@@ -46,6 +46,7 @@ def _axis_plans(length, lower, upper):
 
 
 def _plan_tiles(width, height, tile_size):
+    tile_size = max(1536, min(4096, tile_size))
     lower, upper = max(1536, tile_size - 512), min(4096, tile_size + 512)
     if max(width, height) < lower:
         return [(0, width)], [(0, height)]
@@ -63,7 +64,9 @@ def _plan_tiles(width, height, tile_size):
             if best_score is None or score < best_score:
                 best, best_score = (xs, ys), score
     if best is None:
-        raise ValueError("无法按当前输出尺寸和分块尺寸规划分块，请调整分块尺寸。")
+        # Prefer full coverage over the reference-size constraint when it cannot be met.
+        best = tuple(min(plans, key=lambda intervals: (sum(end - start for start, end in intervals), len(intervals)))
+                     for plans in (x_plans, y_plans))
     return best
 
 
@@ -149,8 +152,10 @@ def _match_colors(image, reference, method):
 
 
 def _model_default(options, filename):
-    return next((name for name in options if name.replace("\\", "/").rsplit("/", 1)[-1] == filename),
-                options[0] if options else None)
+    default = next((name for name in options if name.replace("\\", "/").rsplit("/", 1)[-1] == filename), filename)
+    if default not in options:
+        options.append(default)
+    return default
 
 
 def _registration_image(image, size):
@@ -259,6 +264,11 @@ def _encode_tile(clip, vae, reference, prompt, vision_size="1024"):
         ref_width, ref_height = (max(32, round(side * scale / 32) * 32) for side in (width, height))
         if max(ref_width, ref_height) < max(width, height):
             prepared = cv2.resize(reference, (ref_width, ref_height), interpolation=cv2.INTER_CUBIC)
+    # Whole-image axes can retain an arbitrary output size; stretch rather than crop them.
+    prepared_height, prepared_width = prepared.shape[:2]
+    aligned_width, aligned_height = (math.ceil(side / 32) * 32 for side in (prepared_width, prepared_height))
+    if (aligned_width, aligned_height) != (prepared_width, prepared_height):
+        prepared = cv2.resize(prepared, (aligned_width, aligned_height), interpolation=cv2.INTER_CUBIC)
     prepared = torch.from_numpy(np.clip(prepared, 0, 1)).unsqueeze(0)
     sample_width, sample_height = (math.ceil(side / 32) * 32 for side in (width, height))
     conditioning = MiniMaxH3ImageConditioning.execute(
@@ -271,12 +281,12 @@ def _encode_tile(clip, vae, reference, prompt, vision_size="1024"):
         "kind": "image", "latent_h": reference_latent.shape[-2],
         "latent_w": reference_latent.shape[-1], "latent": reference_latent,
     }]})
+    positive = _conditioning_to_cpu(positive)
     negative, = nodes.ConditioningZeroOut().zero_out(positive)
     return positive, negative, tuple(latent["samples"].shape)
 
 
-def _sample_tile(model, vae, reference, encoded, seed, steps, sampler_name, scheduler, report):
-    height, width = reference.shape[:2]
+def _sample_tile(model, encoded, seed, steps, sampler_name, scheduler, report):
     positive, negative, latent_shape = encoded
     latent = {"samples": torch.zeros(latent_shape, device=comfy.model_management.intermediate_device())}
     latent_image = comfy.sample.fix_empty_latent_channels(model, latent["samples"])
@@ -292,9 +302,13 @@ def _sample_tile(model, vae, reference, encoded, seed, steps, sampler_name, sche
         model, noise, steps, 1.0, sampler_name, scheduler, positive, negative, latent_image,
         denoise=1.0, callback=callback, disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed,
     )
-    sampled = {**latent, "samples": samples}
+    return samples.detach().to(device="cpu")
+
+
+def _decode_tile(vae, reference, samples, report):
+    height, width = reference.shape[:2]
     report("VAE解码中...")
-    decoded, = nodes.VAEDecode().decode(vae, sampled)
+    decoded, = nodes.VAEDecode().decode(vae, {"samples": samples})
     decoded = decoded.detach().to(device="cpu", dtype=torch.float32)
     if decoded.shape[1:3] != (height, width):
         restored = cv2.resize(decoded[0].numpy(), (width, height), interpolation=cv2.INTER_CUBIC)
@@ -323,21 +337,20 @@ class MinimaxH3图像高清修复分块(io.ComfyNode):
                                default=_model_default(clips, "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")),
                 io.Combo.Input("VAE", options=vaes, socketless=True,
                                default=_model_default(vaes, "minimax_h3_image_vae_fp16.safetensors")),
-                io.Combo.Input("LoRA", options=loras, default="minimax-H3-image-高清放大_GH.safetensors", socketless=True),
+                io.Combo.Input("LoRA", options=loras,
+                               default=_model_default(loras, "minimax-H3-image-高清放大_GH.safetensors"), socketless=True),
                 io.Float.Input("LoRA强度", default=1.0, min=-100.0, max=100.0, step=0.01,
                                socketless=True),
-                io.String.Input("提示词", multiline=True, raw_link=True, default="保持构图与颜色不变，将图像高清还原为惊人的8K画质",
-                                tooltip="可直接输入，或将文本框转换为输入后连接外部提示词。"),
-                io.Int.Input("输出长边", default=4096, min=2048, max=12800, step=256,
+                io.String.Input("提示词", multiline=True, raw_link=True, default="保持构图与颜色不变，将图像高清还原为惊人的8K画质。"),
+                io.Int.Input("输出长边", default=3072, min=2048, max=12800, step=256,
                              display_mode=io.NumberDisplay.slider, socketless=True),
-                io.Int.Input("分块尺寸", default=2048, min=1536, max=4096, step=256,
-                             display_mode=io.NumberDisplay.slider, socketless=True,
-                             tooltip="参考值。分块长边在1536～4096且偏差不超过512；整图较小时直接处理整图。部分尺寸组合会有较大重叠。"),
+                io.Int.Input("分块尺寸", default=3072, min=1536, max=4096, step=256,
+                             display_mode=io.NumberDisplay.slider, socketless=True),
                 io.Combo.Input("视觉编码尺寸", options=["跟随分块", "1024", "1280", "1536", "1792", "2048"],
                                default="1024", socketless=True,
                                tooltip="VAE参考图编码短边，编码长边不超过实际分块长边。跟随分块时不做缩放。"),
                 io.Int.Input("种子值", default=833914818116436, min=0, max=0xffffffffffffffff,
-                             control_after_generate=True, socketless=True),
+                             control_after_generate=io.ControlAfterGenerate.fixed, socketless=True),
                 io.Int.Input("步数", default=6, min=1, max=10000, socketless=True),
                 io.Combo.Input("采样器", options=comfy.samplers.KSampler.SAMPLERS, default="lcm",
                                socketless=True),
@@ -346,6 +359,10 @@ class MinimaxH3图像高清修复分块(io.ComfyNode):
                 io.Combo.Input("颜色匹配", options=COLOR_METHODS, default="无", socketless=True),
                 io.Boolean.Input("释放模型", default=False, socketless=True,
                                  tooltip="完成后卸载本节点模型并释放空闲显存，保留条件及分块缓存；下次采样需重新加载模型到显卡。"),
+                io.Combo.Input("LoRA2", options=loras, default="无", socketless=True, optional=True),
+                io.Float.Input("LoRA2强度", default=1.0, min=-100.0, max=100.0, step=0.01,
+                               socketless=True, optional=True),
+                io.Int.Input("LoRA数量", default=1, min=0, max=2, socketless=True, optional=True),
             ],
             outputs=[io.Image.Output("图像")],
             hidden=[io.Hidden.unique_id],
@@ -353,8 +370,23 @@ class MinimaxH3图像高清修复分块(io.ComfyNode):
         )
 
     @classmethod
+    def validate_inputs(cls, 模型, CLIP, VAE, LoRA, LoRA2="无"):
+        # Check files at execution; inactive LoRAs are ignored.
+        return True
+
+    @classmethod
     def execute(cls, 图像, 模型, CLIP, VAE, LoRA, LoRA强度, 提示词,
-                输出长边, 分块尺寸, 颜色匹配, 种子值, 步数, 采样器, 调度器, 释放模型=False, 视觉编码尺寸="1024"):
+                输出长边, 分块尺寸, 颜色匹配, 种子值, 步数, 采样器, 调度器, 释放模型=False, 视觉编码尺寸="1024",
+                LoRA2="无", LoRA2强度=1.0, LoRA数量=1):
+        required_models = [("模型", "diffusion_models", 模型), ("CLIP", "text_encoders", CLIP), ("VAE", "vae", VAE)]
+        active_loras = [(index, name, strength)
+                        for index, (name, strength) in enumerate(((LoRA, LoRA强度), (LoRA2, LoRA2强度)))
+                        if index < LoRA数量 and name != "无" and strength != 0]
+        for index, name, strength in active_loras:
+            required_models.append(("LoRA" if index == 0 else "LoRA2", "loras", name))
+        for label, folder, name in required_models:
+            if folder_paths.get_full_path(folder, name) is None:
+                raise FileNotFoundError(f"找不到{label}模型：{name}。请放入 models/{folder} 或选择已安装的模型。")
         graph = GraphBuilder()
         owner = cls.hidden.unique_id
         clip = graph.node("CLIPLoader", id="clip", clip_name=CLIP, type="minimax", device="default")
@@ -365,11 +397,12 @@ class MinimaxH3图像高清修复分块(io.ComfyNode):
             vision_size=视觉编码尺寸,
         )
         model = graph.node("UNETLoader", id="model", unet_name=模型, weight_dtype="default")
-        if LoRA != "无" and LoRA强度 != 0:
+        for index, name, strength in active_loras:
             model = graph.node(
-                "LoraLoaderModelOnly", id="lora", model=model.out(0),
-                lora_name=LoRA, strength_model=LoRA强度,
+                "LoraLoaderModelOnly", id=f"lora{index + 1}", model=model.out(0),
+                lora_name=name, strength_model=strength,
             )
+            model.set_override_display_id(owner)
         sampling = graph.node(
             "H3TiledSampleGH", id="sampling", image=图像, model=model.out(0), vae=vae.out(0),
             conditions=conditions.out(0),
@@ -448,7 +481,7 @@ class H3TiledEncodeGH(io.ComfyNode):
                     tile_number = row * len(xs) + column + 1
                     _report_tile(plan, image, owner, batch_index, tile_number, len(xs) * len(ys), "条件编码中...")
                     positive, negative, shape = _encode_tile(clip, vae, reference[top:bottom, left:right], prompt, vision_size)
-                    encoded.append((_conditioning_to_cpu(positive), _conditioning_to_cpu(negative), shape))
+                    encoded.append((positive, negative, shape))
                     del positive, negative
                     progress.update(1)
         return io.NodeOutput({
@@ -485,8 +518,22 @@ class H3TiledSampleGH(io.ComfyNode):
             )
 
         report("条件已就绪，准备采样...")
+        sampled_tiles = []
         repaired = []
-        progress = comfy.utils.ProgressBar(image.shape[0] * len(xs) * len(ys))
+        progress = comfy.utils.ProgressBar(image.shape[0] * tile_count * 2)
+        for batch_index in range(image.shape[0]):
+            for row in range(len(ys)):
+                for column in range(len(xs)):
+                    comfy.model_management.throw_exception_if_processing_interrupted()
+                    tile_index = (batch_index * len(ys) + row) * len(xs) + column
+                    tile_number = row * len(xs) + column + 1
+                    tile_seed = (seed + tile_index) % (1 << 64)
+                    sampled_tiles.append(_sample_tile(
+                        model, conditions["encoded"][tile_index],
+                        tile_seed, steps, sampler_name, scheduler, report,
+                    ))
+                    progress.update(1)
+
         for batch_index in range(image.shape[0]):
             frame = image[batch_index, ..., :3].detach().to(device="cpu", dtype=torch.float32).numpy()
             reference = cv2.resize(frame, (output_width, output_height), interpolation=cv2.INTER_NEAREST)
@@ -497,11 +544,8 @@ class H3TiledSampleGH(io.ComfyNode):
                     tile_reference = reference[top:bottom, left:right]
                     tile_index = (batch_index * len(ys) + row) * len(xs) + column
                     tile_number = row * len(xs) + column + 1
-                    tile_seed = (seed + tile_index) % (1 << 64)
-                    tile = _sample_tile(
-                        model, vae, tile_reference, conditions["encoded"][tile_index],
-                        tile_seed, steps, sampler_name, scheduler, report,
-                    )
+                    tile = _decode_tile(vae, tile_reference, sampled_tiles[tile_index], report)
+                    sampled_tiles[tile_index] = None
                     packed = zlib.compress(tile.tobytes(), level=1)
                     repaired.append((torch.frombuffer(bytearray(packed), dtype=torch.uint8), tile.shape))
                     del tile, packed
@@ -543,9 +587,11 @@ class H3TiledFinishGH(io.ComfyNode):
         result = torch.empty((image.shape[0], output_height, output_width, 3), dtype=torch.float32, device="cpu")
         progress = comfy.utils.ProgressBar(image.shape[0] * tile_count)
         for batch_index in range(image.shape[0]):
-            frame = image[batch_index, ..., :3].detach().to(device="cpu", dtype=torch.float32).numpy()
-            reference = cv2.resize(frame, (output_width, output_height), interpolation=cv2.INTER_NEAREST)
-            np.clip(reference, 0, 1, out=reference)
+            frame, reference, tile_reference = None, None, None
+            if color_match != "无":
+                frame = image[batch_index, ..., :3].detach().to(device="cpu", dtype=torch.float32).numpy()
+                reference = cv2.resize(frame, (output_width, output_height), interpolation=cv2.INTER_NEAREST)
+                np.clip(reference, 0, 1, out=reference)
             canvas = result[batch_index].numpy()
             canvas.fill(0)
             for row, (top, bottom) in enumerate(ys):
@@ -553,14 +599,14 @@ class H3TiledFinishGH(io.ComfyNode):
                 for column, (left, right) in enumerate(xs):
                     comfy.model_management.throw_exception_if_processing_interrupted()
                     x0, x1, wx = x_blends[column]
-                    tile_reference = reference[top:bottom, left:right]
                     tile_index = (batch_index * len(ys) + row) * len(xs) + column
                     tile_number = row * len(xs) + column + 1
                     packed, shape = tiles["repaired"][tile_index]
                     tile = np.frombuffer(zlib.decompress(packed.numpy().tobytes()), dtype=np.float32).reshape(shape)
                     report("颜色还原中..." if color_match != "无" else "拼接中...")
-                    tile = _match_colors(tile, tile_reference, color_match)
                     if color_match != "无":
+                        tile_reference = reference[top:bottom, left:right]
+                        tile = _match_colors(tile, tile_reference, color_match)
                         report("拼接中...")
                     visible = tile[y0 - top:y1 - top, x0 - left:x1 - left]
                     # Complementary ramps form a partition of unity, including four-tile intersections.

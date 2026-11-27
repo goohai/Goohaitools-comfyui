@@ -6,6 +6,109 @@ const INTERNAL_NODE_TYPES = new Set(["H3TiledEncodeGH", "H3TiledSampleGH", "H3Ti
 const upscaleNodes = new Set();
 const PROMPT_MIN_HEIGHT = 64;
 
+const passThroughStyle = document.createElement("style");
+passThroughStyle.textContent = `
+.gh-h3-canvas-pass-through,
+.gh-h3-canvas-pass-through *,
+.dom-widget:has(.gh-h3-canvas-pass-through),
+.dom-widget:has(.gh-h3-canvas-pass-through) *,
+[data-widget-name="gh_h3_lora_controls"],
+[data-widget-name="gh_h3_lora_controls"] * {
+    pointer-events: none !important;
+}
+.gh-h3-canvas-pass-through button[data-hovered="true"] {
+    background: var(--comfy-input-bg,#333) !important;
+}
+`;
+document.head.appendChild(passThroughStyle);
+
+function loraButtonAt(event) {
+    const canvas = app.canvas;
+    if (!canvas?.graph || !upscaleNodes.size) return;
+    const element = document.elementFromPoint(event.clientX, event.clientY);
+    if (element?.closest('button, input, textarea, select, [role="menu"], [role="dialog"], [role="listbox"], [role="combobox"], [contenteditable="true"]')) return;
+    const vueNode = element?.closest(".lg-node[data-node-id]");
+    let node;
+    if (vueNode) {
+        node = canvas.graph.getNodeById(vueNode.dataset.nodeId);
+    } else if (element === canvas.canvas) {
+        const point = canvas.convertEventToCanvasOffset(event);
+        node = canvas.graph.getNodeOnPos(point[0], point[1], canvas.visible_nodes);
+    }
+    if (!upscaleNodes.has(node) || node.flags.collapsed) return;
+    for (const button of node._ghUpscaleStatus.loraRoot.children) {
+        if (button.hidden) continue;
+        const rect = button.getBoundingClientRect();
+        if (rect.width && rect.height && event.clientX >= rect.left && event.clientX <= rect.right &&
+            event.clientY >= rect.top && event.clientY <= rect.bottom) return { node, button };
+    }
+}
+
+function setLoraWidgetVisible(widget, visible) {
+    if (!widget._ghLoraLayout) {
+        widget._ghLoraLayout = {
+            computeSize: widget.computeSize, computeLayoutSize: widget.computeLayoutSize,
+            draw: widget.draw, mouse: widget.mouse,
+        };
+    }
+    widget.hidden = !visible;
+    for (const name of ["computeSize", "computeLayoutSize", "draw", "mouse"]) {
+        if (visible) widget[name] = widget._ghLoraLayout[name];
+    }
+    if (!visible) {
+        widget.computeSize = () => [0, 0];
+        widget.computeLayoutSize = () => ({ minHeight: 0, maxHeight: 0 });
+        widget.draw = () => {};
+        widget.mouse = () => false;
+    }
+}
+
+function syncLoraControls(node, body) {
+    const state = node._ghUpscaleStatus;
+    const count = Math.max(0, Math.min(2, Number(state.loraCount.value) || 0));
+    for (const [index, names] of [[1, ["LoRA", "LoRA强度"]], [2, ["LoRA2", "LoRA2强度"]]]) {
+        for (const name of names) {
+            const widget = node.widgets.find((item) => item.name === name);
+            if (widget.hidden !== (count < index)) setLoraWidgetVisible(widget, count >= index);
+            const row = body?.querySelector(`[data-widget-name="${name}"]`);
+            if (row) row.style.display = count >= index ? "" : "none";
+        }
+    }
+    const countRow = body?.querySelector('[data-widget-name="LoRA数量"]');
+    if (countRow) countRow.style.display = "none";
+    state.loraRoot.querySelector('[data-action="add"]').hidden = count === 2;
+    state.loraRoot.querySelector('[data-action="remove"]').hidden = count === 0;
+}
+
+function installLoraControls(node) {
+    const state = node._ghUpscaleStatus;
+    const addedNames = new Set(["LoRA2", "LoRA2强度", "LoRA数量"]);
+    state.legacyWidgets = node.widgets.filter((item) => !addedNames.has(item.name) && item.serialize !== false && item.options?.serialize !== false);
+    state.loraCount = node.widgets.find((item) => item.name === "LoRA数量");
+    setLoraWidgetVisible(state.loraCount, false);
+    const root = document.createElement("div");
+    root.className = "gh-h3-canvas-pass-through";
+    root.style.cssText = "display:flex;justify-content:flex-start;gap:4px;box-sizing:border-box;width:100%;min-width:0;height:10px;padding:0 18px;align-items:flex-start;transform:translateY(-3px);pointer-events:none;user-select:none;";
+    for (const [action, text] of [["add", "+"], ["remove", "−"]]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.tabIndex = -1;
+        button.dataset.action = action;
+        button.textContent = text;
+        button.style.cssText = "box-sizing:border-box;width:16px;min-width:16px;height:14px;padding:0;border:1px solid #666;border-radius:2px;background:transparent;color:var(--input-text,#ddd);font:11px/11px sans-serif;pointer-events:none;";
+        root.append(button);
+    }
+    state.loraRoot = root;
+    const controls = node.addDOMWidget("gh_h3_lora_controls", "gh_h3_lora_controls", root, {
+        serialize: false, hideOnZoom: false, margin: 0, getMinHeight: () => 10, getMaxHeight: () => 10,
+        surfaces: { canvas: "shown", vueNode: "shown", panel: "never" },
+    });
+    controls.serialize = false;
+    const extras = ["LoRA2", "LoRA2强度"].map((name) => node.widgets.find((item) => item.name === name));
+    for (const widget of [...extras, controls]) node.widgets.splice(node.widgets.indexOf(widget), 1);
+    node.widgets.splice(node.widgets.findIndex((item) => item.name === "LoRA强度") + 1, 0, ...extras, controls);
+}
+
 function resizeUpscalePrompt(node) {
     const state = node._ghUpscaleStatus;
     const delta = node.size[1] - state.resizeHeight;
@@ -17,8 +120,6 @@ function resizeUpscalePrompt(node) {
 function syncUpscaleLayout(node, body) {
     const state = node._ghUpscaleStatus;
     if (!state || state.disposed || state.sizing) return;
-    const host = state.root.closest(".dom-widget");
-    host?.style.setProperty("pointer-events", "none", "important");
     const preview = node.widgets?.find((item) => item.name === "$$canvas-image-preview");
     const image = node.imgs?.[node.imageIndex ?? 0] || node.imgs?.[0];
     const vueImage = body?.querySelector(".image-preview, img[data-testid='main-image'], img[alt]");
@@ -31,13 +132,19 @@ function syncUpscaleLayout(node, body) {
     }
     if (state.previewWidget !== preview && preview) {
         state.previewWidget = preview;
-        const imageWidth = image?.naturalWidth || image?.width || 1;
-        const imageHeight = image?.naturalHeight || image?.height || 1;
-        state.previewHeight = Math.max(220, (node.size[0] - 20) * imageHeight / imageWidth);
         const layout = preview.computeLayoutSize.bind(preview);
         preview.computeLayoutSize = function () {
             return { ...layout(), minHeight: state.previewHeight, maxHeight: state.previewHeight };
         };
+    }
+    if (preview) {
+        const imageWidth = image?.naturalWidth || image?.width || vueImage?.naturalWidth || 1;
+        const imageHeight = image?.naturalHeight || image?.height || vueImage?.naturalHeight || 1;
+        const height = Math.max(220, (node.size[0] - 20) * imageHeight / imageWidth);
+        if (state.previewHeight !== height) {
+            state.previewHeight = height;
+            if (!state.manualResize && app.canvas?.resizing_node !== node) state.compactPending = true;
+        }
     }
     if (state.manualResize || app.canvas?.resizing_node === node) {
         state.hasPreview = hasPreview;
@@ -109,6 +216,7 @@ function pinUpscaleStatus(node) {
         handle.style.pointerEvents = "auto";
     }
     const body = vueNode?.querySelector(`[data-testid="node-body-${CSS.escape(String(node.id))}"]`);
+    syncLoraControls(node, body);
     let parameters = body?.querySelector('[data-testid="node-widgets"]');
     while (parameters && parameters.parentElement !== body) parameters = parameters.parentElement;
     if (body && parameters && parameters.nextElementSibling !== state.vueRoot) {
@@ -190,6 +298,7 @@ function installUpscaleStatus(node) {
         seedControl.label = "生成后控制";
     }
     const root = document.createElement("div");
+    root.className = "gh-h3-canvas-pass-through";
     root.style.cssText = "box-sizing:border-box;width:100%;padding:2px 10px 6px;color:var(--input-text,#ddd);font:14px/20px sans-serif;overflow:hidden;pointer-events:none;";
     const vueRoot = root.cloneNode(false);
     vueRoot.style.flex = "0 0 auto";
@@ -198,16 +307,16 @@ function installUpscaleStatus(node) {
         surfaces: { canvas: "shown", vueNode: "never", panel: "never" },
     });
     widget.serialize = false;
-    widget.options.onDraw = () => root.closest(".dom-widget")?.style.setProperty("pointer-events", "none", "important");
     const prompt = node.widgets.find((item) => item.name === "提示词");
     prompt.options.getMinHeight = () => PROMPT_MIN_HEIGHT;
     prompt.options.getMaxHeight = () => node._ghUpscaleStatus.promptHeight;
     node._ghUpscaleStatus = {
-        root, vueRoot, widget, prompt,
+        root, vueRoot, widget,
         promptHeight: Math.max(PROMPT_MIN_HEIGHT, Number(node.properties.gh_h3_prompt_height) || 96),
         lastNodeHeight: node.size[1],
         running: false, planVersion: 0, compactPending: true,
     };
+    installLoraControls(node);
     upscaleNodes.add(node);
     for (const name of ["输出长边", "分块尺寸"]) {
         const slider = node.widgets.find((item) => item.name === name);
@@ -237,6 +346,49 @@ app.registerExtension({
         if ((node.comfyClass || node.type) === UPSCALE_TYPE) installUpscaleStatus(node);
     },
     setup() {
+        let loraTap = null;
+        let hoveredLoraButton = null;
+        let hoverFrame = null;
+        let hoverPosition = null;
+        document.addEventListener("pointerdown", (event) => {
+            loraTap = event.button === 0 && !app.canvas?.read_only && !event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey
+                ? loraButtonAt(event) : null;
+            if (loraTap) Object.assign(loraTap, { x: event.clientX, y: event.clientY });
+        }, { capture: true, passive: true });
+        document.addEventListener("pointermove", (event) => {
+            if (loraTap && Math.hypot(event.clientX - loraTap.x, event.clientY - loraTap.y) > 3) loraTap = null;
+            hoverPosition = { clientX: event.clientX, clientY: event.clientY };
+            if (hoverFrame !== null) return;
+            hoverFrame = requestAnimationFrame(() => {
+                hoverFrame = null;
+                const button = loraButtonAt(hoverPosition)?.button || null;
+                if (button !== hoveredLoraButton) {
+                    hoveredLoraButton?.removeAttribute("data-hovered");
+                    button?.setAttribute("data-hovered", "true");
+                    hoveredLoraButton = button;
+                }
+            });
+        }, { capture: true, passive: true });
+        document.addEventListener("pointerout", (event) => {
+            if (event.relatedTarget) return;
+            if (hoverFrame !== null) cancelAnimationFrame(hoverFrame);
+            hoverFrame = null;
+            hoveredLoraButton?.removeAttribute("data-hovered");
+            hoveredLoraButton = null;
+        }, { capture: true, passive: true });
+        document.addEventListener("pointercancel", () => { loraTap = null; }, { capture: true, passive: true });
+        document.addEventListener("click", (event) => {
+            const tap = loraTap;
+            loraTap = null;
+            if (!tap || event.button !== 0 || event.detail !== 1 || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return;
+            const hit = loraButtonAt(event);
+            if (hit?.node !== tap.node || hit.button !== tap.button) return;
+            const state = tap.node._ghUpscaleStatus;
+            state.loraCount.value = Math.max(0, Math.min(2, Number(state.loraCount.value) + (tap.button.dataset.action === "add" ? 1 : -1)));
+            state.compactPending = true;
+            pinUpscaleStatus(tap.node);
+            tap.node.graph?.change();
+        }, { capture: true, passive: true });
         api.addEventListener("goohai_h3_upscale_status", ({ detail }) => {
             for (const node of upscaleNodes) {
                 if (String(node.id) !== String(detail.node_id)) continue;
@@ -265,17 +417,40 @@ app.registerExtension({
             });
         }
         let frame = null;
-        const observer = new MutationObserver(() => {
-            if (frame !== null || !upscaleNodes.size) return;
+        const pendingNodes = new Set();
+        const observer = new MutationObserver((records) => {
+            if (!upscaleNodes.size) return;
+            const affectedIds = new Set();
+            for (const record of records) {
+                const nodeElement = record.target instanceof Element ? record.target.closest(".lg-node[data-node-id]") : null;
+                if (nodeElement) affectedIds.add(nodeElement.dataset.nodeId);
+                for (const element of record.addedNodes) {
+                    if (!(element instanceof Element)) continue;
+                    if (element.matches(".lg-node[data-node-id]")) affectedIds.add(element.dataset.nodeId);
+                    for (const child of element.querySelectorAll(".lg-node[data-node-id]")) affectedIds.add(child.dataset.nodeId);
+                }
+            }
+            if (!affectedIds.size) return;
+            for (const node of upscaleNodes) {
+                if (affectedIds.has(String(node.id))) pendingNodes.add(node);
+                if (affectedIds.has(String(node.getInputNode?.(0)?.id))) scheduleUpscalePlan(node);
+            }
+            if (frame !== null || !pendingNodes.size) return;
             frame = requestAnimationFrame(() => {
                 frame = null;
-                for (const node of upscaleNodes) pinUpscaleStatus(node);
+                for (const node of pendingNodes) pinUpscaleStatus(node);
+                pendingNodes.clear();
             });
         });
         observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
         document.addEventListener("load", (event) => {
             if (event.target instanceof HTMLImageElement) {
-                for (const node of upscaleNodes) scheduleUpscalePlan(node);
+                const nodeId = event.target.closest(".lg-node[data-node-id]")?.dataset.nodeId;
+                if (nodeId == null) return;
+                for (const node of upscaleNodes) {
+                    if (String(node.id) === nodeId) pinUpscaleStatus(node);
+                    if (String(node.getInputNode?.(0)?.id) === nodeId) scheduleUpscalePlan(node);
+                }
             }
         }, true);
         document.addEventListener("pointerdown", (event) => {
@@ -289,9 +464,12 @@ app.registerExtension({
                 }
             }
         }, true);
+        let resizeFrame = null;
         document.addEventListener("pointermove", () => {
+            if (resizeFrame !== null) return;
             if (![...upscaleNodes].some((node) => node._ghUpscaleStatus.manualResize)) return;
-            requestAnimationFrame(() => {
+            resizeFrame = requestAnimationFrame(() => {
+                resizeFrame = null;
                 for (const node of upscaleNodes) {
                     if (!node._ghUpscaleStatus.manualResize) continue;
                     resizeUpscalePrompt(node);
@@ -327,8 +505,16 @@ app.registerExtension({
                 const result = original?.apply(this, arguments);
                 if (name === "onConfigure" && this._ghUpscaleStatus) {
                     const state = this._ghUpscaleStatus;
+                    const values = arguments[0]?.widgets_values;
+                    if (values?.length === state.legacyWidgets.length) {
+                        state.legacyWidgets.forEach((widget, index) => { widget.value = values[index]; });
+                        this.widgets.find((widget) => widget.name === "LoRA2").value = "无";
+                        this.widgets.find((widget) => widget.name === "LoRA2强度").value = 1;
+                        state.loraCount.value = 1;
+                    }
                     state.promptHeight = Math.max(PROMPT_MIN_HEIGHT, Number(this.properties.gh_h3_prompt_height) || 96);
                     state.compactPending = true;
+                    pinUpscaleStatus(this);
                 }
                 scheduleUpscalePlan(this);
                 return result;
